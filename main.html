@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Main | プログラミング教室</title>
+  <!-- CodeMirror -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/codemirror@5.65.13/lib/codemirror.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/codemirror@5.65.13/addon/lint/lint.css">
+  <link rel="stylesheet" href="./style.css">
+  <style>
+    /* ツリー表示と横スクロール整列（直近版を踏襲） */
+    #taskList { position: relative; overflow-x: auto; }
+    #taskList h2 { margin: 0 0 8px 0; }
+    #tasks { list-style: none; margin: 0; padding-left: 0; min-width: max-content; }
+    #tasks li {
+      display: grid;
+      grid-template-columns: var(--indent, 0px) 20px 12px minmax(480px, 1fr) auto;
+      align-items: center;
+      column-gap: 4px;
+      padding: 6px 8px;
+      margin: 2px 0;
+      border-radius: 6px;
+      cursor: pointer;
+      user-select: none;
+      white-space: nowrap;
+    }
+    #tasks li:hover { background: #f3f9ff; }
+    #tasks li.active { background: #cdeeff; }
+    #tasks li.folder-item { background: #f5fbff; border: 1px solid #e4f2ff; }
+
+    .indent { width: var(--indent, 0px); height: 1px; }
+    .toggle-btn {
+      width: 16px; height: 16px; min-width: 16px;
+      display: inline-flex; align-items: center; justify-content: center;
+      border: 1px solid #bcd6f5; background: #e9f3ff; color: #1b5fbf;
+      border-radius: 3px; font-size: 11px; user-select: none; line-height: 1;
+    }
+    .toggle-ph { width: 16px; height: 16px; }
+    .task-icon { width: 10px; height: 10px; border-radius: 50%; display:inline-block; }
+    .icon-ph  { width: 10px; height: 10px; display:inline-block; }
+
+    .title-cell { overflow: hidden; text-overflow: ellipsis; }
+    .status-badge {
+      position: sticky; right: 0;
+      margin-left: 8px;
+      padding: 1px 6px;
+      font-size: 11px;
+      border: 1px solid #d9d9d9; color:#333; background:#fff;
+      border-radius: 4px;
+      box-shadow: -4px 0 6px -4px rgba(0,0,0,.15);
+    }
+
+    #problemText, #hint { line-height: 1.6; }
+    #outputArea { white-space: pre-wrap; }
+
+    #editorWrapper.locked { background:#f5f5f5; filter:grayscale(.2); border-radius:6px; }
+    #editorWrapper.locked .CodeMirror { background:#f5f5f5; }
+    button[disabled] { opacity:.55; cursor:default !important; }
+
+    /* Assist ラベルの見た目切替 */
+    #assistLabel.disabled { color:#9aa0a6; }
+  </style>
+</head>
+<body>
+  <div id="studentInfo" class="student-info"></div>
+
+  <div id="container">
+    <aside id="taskList" aria-label="課題一覧">
+      <h2>課題</h2>
+      <ul id="tasks"></ul>
+    </aside>
+
+    <section id="problemArea" aria-label="問題文">
+      <h2 id="problemTitle">問題</h2>
+      <div id="problemText"></div>
+      <button id="hintButton">ヒントを見る</button>
+      <div id="hint" hidden></div>
+    </section>
+
+    <section id="codeAndOutput" aria-label="プログラムと実行結果">
+      <div id="programHeader"><h2>プログラム</h2></div>
+      <div id="editorWrapper">
+        <div id="editorControls">
+          <button id="playButton" title="実行">▶</button>
+          <button id="stopIconButton" title="停止" hidden>■</button>
+        </div>
+        <textarea id="editor" aria-label="コード入力欄"></textarea>
+        <pre id="ghostText" aria-hidden="true"></pre>
+      </div>
+      <div id="outputWrapper">
+        <h2>実行結果</h2>
+        <div id="outputArea" class="output-area"></div>
+      </div>
+    </section>
+  </div>
+
+  <div id="controls">
+    <button id="runButton">実行</button>
+    <button id="stopButton">停止</button>
+    <button id="saveButton" disabled>上書き保存</button>
+    <button id="submitButton">提出</button>
+    <label id="assistLabel" class="disabled">
+      <input type="checkbox" id="assistToggle" disabled> コーディングアシスト
+    </label>
+    <button id="helpButton">HELP</button>
+    <div id="statusMessage" aria-live="polite"></div>
+    <button id="logoutButton">ログアウト</button>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/pyodide/v0.22.1/full/pyodide.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.13/lib/codemirror.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.13/mode/python/python.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.13/addon/lint/lint.js"></script>
+  <script src="./config.js"></script>
+  <script src="./main.js"></script>
+</body>
+</html>

@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>課題エディタ</title>
+  <link rel="stylesheet" href="./style.css" />
+  <link
+    rel="stylesheet"
+    href="https://cdn.jsdelivr.net/npm/codemirror@5.65.13/lib/codemirror.css"
+  />
+  <script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.13/lib/codemirror.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.13/mode/python/python.js"></script>
+  <style>
+    /* --- 三分割レイアウト --- */
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
+        Arial, "Noto Sans JP", "Apple Color Emoji", "Segoe UI Emoji";
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+    header {
+      padding: 10px 14px;
+      border-bottom: 1px solid #e5e5e5;
+      background: #fafafa;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+    }
+    #anonBadge {
+      font-size: 12px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: #fff3cd;
+      color: #6a4a00;
+      border: 1px solid #ffe08a;
+    }
+    #container {
+      flex: 1;
+      display: flex;
+      min-height: 0; /* 重要：flex子のoverflow有効化 */
+    }
+
+    /* 左ペイン：課題一覧 */
+    #pane-left {
+      width: 26%;
+      min-width: 280px;
+      border-right: 1px solid #e5e5e5;
+      display: flex;
+      flex-direction: column;
+      padding: 10px;
+      gap: 10px;
+      overflow: hidden;
+    }
+    #left-actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr 1fr;
+      gap: 6px;
+    }
+    #taskTree {
+      flex: 1;
+      overflow: auto;
+      padding: 0;
+      margin: 0;
+      list-style: none;
+    }
+    #taskTree li {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 8px;
+      margin: 2px 0;
+      border-radius: 6px;
+      cursor: pointer;
+      user-select: none;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    #taskTree li:hover {
+      background: #f3f9ff;
+    }
+    #taskTree li.active {
+      background: #cdeeff;
+    }
+    /* フォルダ行の見た目を色分け */
+    #taskTree li.folder-item {
+      background: #f5fbff;
+      border: 1px solid #e4f2ff;
+    }
+    .folder-tag {
+      font-size: 11px;
+      padding: 1px 6px;
+      border-radius: 999px;
+      background: #eef7ff;
+      color: #1976d2;
+      margin-left: 6px;
+    }
+    /* 折り畳みボタン（四角） */
+    .toggle-btn {
+      width: 18px;
+      height: 18px;
+      min-width: 18px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border: 1px solid #bcd6f5;
+      background: #e9f3ff;
+      color: #1b5fbf;
+      border-radius: 3px;
+      font-size: 12px;
+      cursor: pointer;
+      user-select: none;
+    }
+    .toggle-btn:active {
+      transform: translateY(1px);
+    }
+    .indent {
+      display: inline-block;
+      width: var(--indent, 0px);
+      height: 1px;
+    }
+
+    /* 中央ペイン：本文・メタ情報 */
+    #pane-center {
+      width: 37%;
+      border-right: 1px solid #e5e5e5;
+      padding: 12px;
+      overflow: auto;
+    }
+    .field {
+      margin-bottom: 12px;
+    }
+    .field label {
+      display: block;
+      font-size: 13px;
+      color: #555;
+      margin-bottom: 4px;
+    }
+    .field input[type="text"],
+    .field select,
+    .field textarea {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 8px 10px;
+      border: 1px solid #d9d9d9;
+      border-radius: 6px;
+      font-size: 14px;
+      background: #fff;
+    }
+    /* 視覚的にIDが編集不可と分かるように */
+    #taskId[disabled] {
+      background: #f3f3f3;
+      color: #777;
+      border-style: dashed;
+    }
+    .field textarea {
+      min-height: 120px;
+      resize: vertical;
+    }
+    /* グレイアウト（フォルダ作成モード） */
+    .is-disabled {
+      opacity: 0.5;
+      pointer-events: none;
+    }
+
+    /* 右ペイン：解答例／初期コード（少し縦短めに） */
+    #pane-right {
+      width: 37%;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      overflow: auto; /* 右ペイン個別スクロール */
+    }
+    .editor-block {
+      flex: 0 0 45%;
+      min-height: 200px;
+      display: flex;
+      flex-direction: column;
+    }
+    .editor-block header {
+      padding: 6px 0;
+      border: none;
+      background: transparent;
+      font-weight: 600;
+    }
+    .cm-wrapper {
+      flex: 1;
+      min-height: 0;
+      border: 1px solid #d9d9d9;
+      border-radius: 6px;
+      overflow: hidden;
+      background: #fff;
+    }
+    .CodeMirror {
+      height: 100%;
+    }
+
+    /* アクション＆ステータス */
+    #center-actions {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      margin-top: 10px;
+    }
+    button {
+      appearance: none;
+      border: 1px solid #d0d0d0;
+      background: #fff;
+      border-radius: 6px;
+      padding: 8px 12px;
+      font-size: 14px;
+      cursor: pointer;
+    }
+    button.primary {
+      background: #1976d2;
+      color: #fff;
+      border-color: #1976d2;
+    }
+    button:disabled {
+      opacity: 0.6;
+      cursor: default;
+    }
+    #taskStatusMsg {
+      margin-left: 6px;
+      font-size: 13px;
+      color: #555;
+    }
+    #taskStatusMsg.success {
+      color: #2e7d32;
+    }
+    #taskStatusMsg.error {
+      color: #d32f2f;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1 style="margin:0;font-size:18px;">課題エディタ</h1>
+    <span id="anonBadge" hidden>ログインなしで編集中</span>
+  </header>
+
+  <div id="container">
+    <!-- 左：課題一覧（フォルダ作成ボタンあり） -->
+    <aside id="pane-left">
+      <div id="left-actions">
+        <button id="btnNewTask" title="新しい課題を作成">課題作成</button>
+        <button id="btnNewFolder" title="新しいフォルダを作成">フォルダ作成</button>
+        <button id="btnCopy" title="選択中の課題を複製">コピーを作成</button>
+        <button id="btnReload" title="一覧を再読込">再読込</button>
+      </div>
+      <ul id="taskTree" aria-label="課題一覧ツリー"></ul>
+    </aside>
+
+    <!-- 中央：基本情報・本文 -->
+    <main id="pane-center">
+      <div class="field">
+        <label for="taskId">課題ID（自動採番／編集不可）</label>
+        <input id="taskId" type="text" disabled />
+      </div>
+      <div class="field">
+        <label for="taskTitle">タイトル</label>
+        <input id="taskTitle" type="text" placeholder="例：リストの基本操作" />
+      </div>
+      <div class="field">
+        <label for="taskParentId">親フォルダ</label>
+        <select id="taskParentId">
+          <option value="">（なし／ルート）</option>
+        </select>
+      </div>
+      <div class="field" id="field-desc">
+        <label for="taskDesc">問題文（HTML可）</label>
+        <textarea id="taskDesc" placeholder="<p>・・・</p>"></textarea>
+      </div>
+      <div class="field" id="field-hint">
+        <label for="taskHint">ヒント（HTML可）</label>
+        <textarea id="taskHint" placeholder="<ul><li>・・・</li></ul>"></textarea>
+      </div>
+
+      <div id="center-actions">
+        <button id="saveTaskButton" class="primary">保存</button>
+        <span id="taskStatusMsg" aria-live="polite"></span>
+      </div>
+    </main>
+
+    <!-- 右：解答例・初期コード -->
+    <section id="pane-right">
+      <div class="editor-block" id="block-answer">
+        <header>解答例（Python）</header>
+        <div class="cm-wrapper">
+          <textarea id="answerEditor"></textarea>
+        </div>
+      </div>
+      <div class="editor-block" id="block-initial">
+        <header>初期コード（Python）</header>
+        <div class="cm-wrapper">
+          <textarea id="initialEditor"></textarea>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <script src="./config.js"></script>
+  <script src="./task_editor.js"></script>
+</body>
+</html>

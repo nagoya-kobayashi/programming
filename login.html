@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <title>ログイン | プログラミング学習</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <script src="config.js"></script>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans JP", sans-serif;
+      background: #f8f9fa;
+      color: #333;
+      margin: 0;
+      padding: 0;
+    }
+    .container {
+      max-width: 420px;
+      margin: 80px auto;
+      background: #fff;
+      padding: 32px 28px;
+      border-radius: 12px;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.1);
+    }
+    h1 {
+      font-size: 22px;
+      margin-top: 0;
+      margin-bottom: 24px;
+      text-align: center;
+      color: #1677ff;
+    }
+    label {
+      display: block;
+      font-weight: 600;
+      margin-bottom: 6px;
+    }
+    input[type="text"], input[type="password"] {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1px solid #ccc;
+      border-radius: 8px;
+      font-size: 15px;
+    }
+    button {
+      width: 100%;
+      padding: 10px;
+      margin-top: 18px;
+      font-size: 15px;
+      background: #1677ff;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+    }
+    button:hover {
+      background: #005ce6;
+    }
+    button:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+    .msg {
+      margin-top: 8px;
+      font-size: 14px;
+      text-align: center;
+    }
+    .error { color: #d93025; }
+    .ok { color: #188038; }
+    .hidden { display: none; }
+    .back {
+      text-align: center;
+      margin-top: 16px;
+    }
+    .back a {
+      color: #1677ff;
+      text-decoration: none;
+      font-size: 14px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>ログイン</h1>
+
+    <!-- Step 1: ID 入力 -->
+    <div id="stepId">
+      <form id="idForm">
+        <label for="loginId">ユーザID</label>
+        <input type="text" id="loginId" placeholder="例：s101" autocomplete="off" required />
+        <button type="submit">次へ</button>
+        <div id="loginStatusId" class="msg"></div>
+      </form>
+    </div>
+
+    <!-- Step 2: パスワード入力 -->
+    <div id="stepPw" class="hidden">
+      <form id="pwForm">
+        <label for="loginPassword">パスワード</label>
+        <input type="password" id="loginPassword" placeholder="パスワードを入力" autocomplete="off" required />
+        <button type="submit">ログイン</button>
+        <div id="loginStatusPw" class="msg"></div>
+      </form>
+    </div>
+
+    <div class="back">
+      <a href="index.html">← トップページへ戻る</a>
+    </div>
+  </div>
+
+  <script>
+    window.addEventListener('DOMContentLoaded', () => {
+      const stepId = document.getElementById('stepId');
+      const stepPw = document.getElementById('stepPw');
+      const idForm = document.getElementById('idForm');
+      const pwForm = document.getElementById('pwForm');
+      const idInput = document.getElementById('loginId');
+      const pwInput = document.getElementById('loginPassword');
+      const idMsg = document.getElementById('loginStatusId');
+      const pwMsg = document.getElementById('loginStatusPw');
+
+      const APP = window.APP_CONFIG || {};
+      const server = APP.serverBaseUrl || '';
+
+      const initId = new URLSearchParams(location.search).get('id') || '';
+      if (initId) idInput.value = initId;
+
+      let cachedSalt = '';
+
+      function show(el, on) { el.classList.toggle('hidden', !on); }
+      function setMsg(el, msg, ok=false, err=false) {
+        el.textContent = msg || '';
+        el.className = 'msg ' + (err ? 'error' : ok ? 'ok' : '');
+      }
+
+      async function sha256Hex(text) {
+        const enc = new TextEncoder();
+        const buf = await crypto.subtle.digest('SHA-256', enc.encode(text));
+        const arr = Array.from(new Uint8Array(buf));
+        return arr.map(b => b.toString(16).padStart(2, '0')).join('');
+      }
+
+      async function fetchJson(url) {
+        const res = await fetch(url);
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return await res.json();
+      }
+
+      // Step1: ID送信 → SALT取得
+      idForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const id = (idInput.value || '').trim();
+        if (!id) { setMsg(idMsg, 'IDを入力してください', false, true); return; }
+        if (!server) { setMsg(idMsg, 'サーバURL未設定です(config.js)', false, true); return; }
+        setMsg(idMsg, 'SALTを取得中...');
+        try {
+          const url = server + '?action=getSalt&id=' + encodeURIComponent(id);
+          const data = await fetchJson(url);
+          if (data && data.status === 'ok' && data.salt) {
+            cachedSalt = data.salt;
+            setMsg(idMsg, 'SALTを取得しました。パスワードを入力してください。', true);
+            show(stepId, false);
+            show(stepPw, true);
+            pwInput.focus();
+          } else {
+            setMsg(idMsg, (data && data.message) || 'IDが無効です。', false, true);
+          }
+        } catch (err) {
+          setMsg(idMsg, '通信に失敗しました。', false, true);
+        }
+      });
+
+      // Step2: パスワード送信 → ハッシュ比較 → セッション発行
+      pwForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const id = (idInput.value || '').trim();
+        const pw = (pwInput.value || '');
+        if (!id || !cachedSalt) { setMsg(pwMsg, 'IDを入力してSALTを取得してください。', false, true); return; }
+        if (!pw) { setMsg(pwMsg, 'パスワードを入力してください。', false, true); return; }
+
+        try {
+          setMsg(pwMsg, 'ログイン中...');
+          const hash = await sha256Hex(cachedSalt + pw);
+          const url = server + '?action=login&id=' + encodeURIComponent(id) + '&passwordHash=' + encodeURIComponent(hash);
+          const data = await fetchJson(url);
+          if (data && data.status === 'ok' && data.sessionId) {
+            // ローカルストレージをクリアしてセッション保存
+            try { localStorage.clear(); sessionStorage.clear(); } catch {}
+            try {
+              localStorage.setItem('sessionId', data.sessionId);
+              localStorage.setItem('userId', data.userId || id);
+              localStorage.setItem('classId', data.classId || '');
+              localStorage.setItem('number', data.number || '');
+              sessionStorage.setItem('sessionId', data.sessionId);
+              sessionStorage.setItem('userId', data.userId || id);
+              sessionStorage.setItem('classId', data.classId || '');
+              sessionStorage.setItem('number', data.number || '');
+            } catch {}
+            setMsg(pwMsg, 'ログイン成功。学習画面に移動します。', true);
+            setTimeout(() => { location.href = 'main.html'; }, 600);
+          } else {
+            setMsg(pwMsg, (data && data.message) || 'IDまたはパスワードが正しくありません。', false, true);
+          }
+        } catch (err) {
+          setMsg(pwMsg, '通信に失敗しました。', false, true);
+        }
+      });
+
+      // 初期表示設定
+      show(stepId, true);
+      show(stepPw, false);
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <title>トップ | プログラミング学習</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="style.css" />
+  <script src="config.js"></script>
+  <style>
+    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans JP", sans-serif; }
+    .container { max-width: 720px; margin: 40px auto; padding: 24px; border: 1px solid #e5e5e5; border-radius: 12px; }
+    h1 { margin: 0 0 8px; font-size: 22px; }
+    .meta { color: #555; margin-bottom: 16px; }
+    .actions { margin-top: 20px; display: flex; gap: 12px; }
+    button { padding: 10px 16px; border-radius: 8px; border: 1px solid #ccc; background: #1677ff; color: #fff; cursor: pointer; }
+    button.secondary { background: #fff; color: #1677ff; border-color: #1677ff; }
+    .msg { margin-top: 12px; color: #888; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>プログラミング学習</h1>
+    <div id="meta" class="meta"></div>
+    <div class="actions">
+      <button id="primaryBtn">読み込み中...</button>
+    </div>
+    <div id="note" class="msg"></div>
+  </div>
+
+  <script>
+    (function(){
+      const meta = document.getElementById('meta');
+      const btn = document.getElementById('primaryBtn');
+      const note = document.getElementById('note');
+
+      const APP = window.APP_CONFIG || {};
+      const server = APP.serverBaseUrl || '';
+
+      function qs(key){ return new URLSearchParams(location.search).get(key); }
+      function setSession(sid, uid, cls, num){
+        try {
+          localStorage.setItem('sessionId', sid);
+          localStorage.setItem('userId', uid || '');
+          localStorage.setItem('classId', cls || '');
+          localStorage.setItem('number', num || '');
+          sessionStorage.setItem('sessionId', sid);
+          sessionStorage.setItem('userId', uid || '');
+          sessionStorage.setItem('classId', cls || '');
+          sessionStorage.setItem('number', num || '');
+        } catch {}
+      }
+
+      async function validateSession(sid){
+        if (!server || !sid) return null;
+        try{
+          const res = await fetch(server + '?session=' + encodeURIComponent(sid));
+          if (!res.ok) return null;
+          const data = await res.json();
+          if (data && data.status === 'ok'){
+            // サーバの検証値で上書き
+            setSession(sid, data.userId, data.classId, data.number);
+            return data;
+          }
+          return null;
+        }catch{ return null; }
+      }
+
+      async function main(){
+        btn.disabled = true; btn.textContent = '読み込み中...';
+        // 1) sid= がURLにある場合は優先採用
+        const sidFromUrl = qs('sid');
+        if (sidFromUrl){
+          const v = await validateSession(sidFromUrl);
+          if (v){
+            meta.textContent = `クラス:${v.classId || '?'}　出席番号:${v.number || '?'}（${v.userId || ''}）`;
+            btn.textContent = 'プログラミングをはじめる';
+            btn.disabled = false;
+            btn.onclick = () => location.href = 'main.html';
+            note.textContent = 'QRコード等からのアクセスを検出しました。上のボタンから学習画面へ進んでください。';
+            return;
+          } else {
+            note.textContent = 'URLのセッションが無効でした。ログインしてください。';
+            // fallthrough to local check
+          }
+        }
+
+        // 2) localStorage の sessionId
+        const sidLocal = localStorage.getItem('sessionId');
+        if (sidLocal){
+          const v = await validateSession(sidLocal);
+          if (v){
+            meta.textContent = `クラス:${v.classId || '?'}　出席番号:${v.number || '?'}（${v.userId || ''}）`;
+            btn.textContent = 'プログラミングをはじめる';
+            btn.disabled = false;
+            btn.onclick = () => location.href = 'main.html';
+            note.textContent = 'セッションを検出しました。上のボタンから学習画面へ進んでください。';
+            return;
+          }
+          // セッション無効→一旦破棄
+          try { localStorage.removeItem('sessionId'); } catch {}
+        }
+
+        // 3) セッション無し → ログイン導線のみ
+        meta.textContent = 'セッションが見つかりませんでした。';
+        btn.textContent = 'ログインしてプログラミングをはじめる';
+        btn.disabled = false;
+        btn.onclick = () => location.href = 'login.html';
+        note.textContent = '学校内PCでは初回は登録ページから、2回目以降はログインなしで学習画面に遷移できます。';
+      }
+
+      main();
+    })();
+  </script>
+</body>
+</html>
