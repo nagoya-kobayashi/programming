@@ -1,4 +1,4 @@
-// main.js: プログラミング授業環境のフロントエンドロジック（提出取り消し時の保存順序を修正）
+﻿// main.js: プログラミング授業環境のフロントエンドロジック（提出取り消し時の保存順序を修正）
 
 let pyodide = null;
 let editor = null;
@@ -57,6 +57,42 @@ function buildUrl(path) {
   return base + path;
 }
 
+/* ===== Local Snapshot Utilities ===== */
+function _snapshotKey(){ const base = APP_CONFIG.serverBaseUrl || ''; return `learn.snapshot.${base}`; }
+function loadSnapshot(){
+  try {
+    const k = _snapshotKey();
+    const raw = localStorage.getItem(k);
+    if (!raw) { console.log('[main] snapshot: not found key=', k); return null; }
+    const obj = JSON.parse(raw);
+    console.log('[main] snapshot: loaded', { key: k,
+      tasks: Array.isArray(obj?.tasks) ? obj.tasks.length : -1,
+      stateKeys: obj?.states ? Object.keys(obj.states).length : 0,
+      fetchedAt: obj?.fetchedAt });
+    return obj;
+  }
+  catch(e){ console.warn('snapshot parse error', e); return null; }
+}
+function getLocalState(taskId){
+  const snap = loadSnapshot(); return (snap && snap.states) ? snap.states[String(taskId)] : null;
+}
+function saveLocalState(taskId){
+  try{
+    const snap = loadSnapshot() || {tasks: null, states: {}, fetchedAt: 0};
+    const code = editor ? editor.getValue() : '';
+    const output = (document.getElementById('outputArea')||{}).textContent || '';
+    const state = {
+      code: code,
+      output: output,
+      hintOpened: !!hintOpened,
+      submitted: !!taskSubmitted[currentTaskId],
+      savedAt: new Date().toISOString()
+    };
+    snap.states[String(taskId)] = state;
+    localStorage.setItem(_snapshotKey(), JSON.stringify(snap));
+  } catch(e){ console.warn('saveLocalState failed', e); }
+}
+
 /* ===== セッション永続化 ===== */
 window.addEventListener("DOMContentLoaded", () => { init(); });
 
@@ -94,8 +130,17 @@ async function init() {
   studentInfoDiv.textContent = `クラス:${userClass || "?"}　出席番号:${userNumber || "?"}`;
 
   // 課題一覧ロード→描画
-  await loadTaskListFromServer();
-  renderTaskTree();
+  const snap = loadSnapshot();
+  if (snap && Array.isArray(snap.tasks) && snap.tasks.length > 0) {
+    console.log('[main] init: using snapshot tasks (no server getTasks)');
+    const normalized = normalizeTasks(snap.tasks);
+    applyTasksData(normalized);
+    renderTaskTree();
+  } else {
+    console.log('[main] init: snapshot missing/empty -> call getTasks');
+    await loadTaskListFromServer();
+    renderTaskTree();
+  }
 
   // Pyodide
   pyodide = await loadPyodide({ indexURL: "https://cdn.jsdelivr.net/pyodide/v0.22.1/full/" });
@@ -191,6 +236,37 @@ function redirectToLogin() {
 
 /* ============ 課題一覧の取得・正規化 ============ */
 
+function applyTasksData(normalized) {
+  if (!Array.isArray(normalized)) {
+    tasksData = [];
+    return;
+  }
+  loadCollapsedState();
+  const anySaved = Object.keys(collapsed).length > 0;
+  const currentFolderIds = new Set(normalized.filter(t => t.IsFolder === true).map(t => t.TaskId));
+  if (!anySaved) {
+    currentFolderIds.forEach(id => (collapsed[id] = true));
+    saveCollapsedState();
+  } else {
+    currentFolderIds.forEach(id => { if (!(id in collapsed)) collapsed[id] = true; });
+    for (const id of Object.keys(collapsed)) {
+      if (!currentFolderIds.has(id)) delete collapsed[id];
+    }
+    saveCollapsedState();
+  }
+
+  tasksData = normalized.map(t => ({
+    id: t.TaskId,
+    title: t.Title || t.TaskId,
+    description: t.DescriptionHtml || '',
+    hint: t.HintHtml || '',
+    answer: t.AnswerCode || '',
+    initialCode: t.InitialCode || '',
+    parentId: t.ParentId || '',
+    isFolder: !!t.IsFolder
+  }));
+}
+
 async function loadTaskListFromServer() {
   tasksData = [];
   if (!APP_CONFIG.serverBaseUrl) {
@@ -203,45 +279,22 @@ async function loadTaskListFromServer() {
   params.append('_ts', String(Date.now()));
 
   try {
+    console.log('[main] getTasks: POST', APP_CONFIG.serverBaseUrl);
     const res = await fetch(APP_CONFIG.serverBaseUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: params.toString(),
       cache: 'no-store',
     });
-    const text = await safeText(res);
-    if (!res.ok) { console.error('[Main] getTasks HTTP', res.status, text); return; }
-    const json = safeJson(text);
-    if (!json || json.status !== 'ok' || !Array.isArray(json.tasks)) {
-      console.error('[Main] getTasks アプリエラー', json); return;
-    }
-    const normalized = normalizeTasks(json.tasks);
-
-    // 折り畳みの初期値（初回は全折り畳み）
-    loadCollapsedState();
-    const anySaved = Object.keys(collapsed).length > 0;
-    const currentFolderIds = new Set(normalized.filter(t => t.IsFolder === true).map(t => t.TaskId));
-    if (!anySaved) {
-      currentFolderIds.forEach(id => (collapsed[id] = true));
-      saveCollapsedState();
-    } else {
-      currentFolderIds.forEach(id => { if (!(id in collapsed)) collapsed[id] = true; });
-      for (const id of Object.keys(collapsed)) {
-        if (!currentFolderIds.has(id)) delete collapsed[id];
+      const text = await safeText(res);
+      if (!res.ok) { console.error('[Main] getTasks HTTP', res.status, text); return; }
+      const json = safeJson(text);
+      if (!json || json.status !== 'ok' || !Array.isArray(json.tasks)) {
+        console.error('[Main] getTasks アプリエラー', json); return;
       }
-      saveCollapsedState();
-    }
-
-    tasksData = normalized.map(t => ({
-      id: t.TaskId,
-      title: t.Title || t.TaskId,
-      description: t.DescriptionHtml || '',
-      hint: t.HintHtml || '',
-      answer: t.AnswerCode || '',
-      initialCode: t.InitialCode || '',
-      parentId: t.ParentId || '',
-      isFolder: !!t.IsFolder
-    }));
+      console.log('[main] getTasks: received tasks=', json.tasks.length);
+      const normalized = normalizeTasks(json.tasks);
+      applyTasksData(normalized);
   } catch (err) {
     console.error('[Main] getTasks 例外', err);
   }
@@ -399,6 +452,7 @@ function renderTaskTree() {
 
   applyResultsToList();
   updateStatusBadges();
+  if (currentTaskId) saveLocalState(currentTaskId);
 }
 
 function loadCollapsedState() {
@@ -476,6 +530,9 @@ async function selectTask(nextTaskId) {
     }
   }
 
+  // �O�^�̏����p�X�i���݃L���b�V������‏݂��鏉��j
+  if (currentTaskId) saveLocalState(currentTaskId);
+
   previousTaskId = nextTaskId;
   currentTaskId = nextTaskId;
   saveSelectedTaskId(nextTaskId);
@@ -521,6 +578,7 @@ async function selectTask(nextTaskId) {
 
   // 先にキャッシュ表示（UIは即時切替）
   const cached = loadFromCache(nextTaskId);
+  console.log('[main] selectTask:', nextTaskId, { hasCache: !!cached });
   if (cached) {
     if (editor) editor.getDoc().setValue(cached.code || '');
     outputBuffer = (cached.output || '').replace(/\r\n/g, "\n");
@@ -538,8 +596,28 @@ async function selectTask(nextTaskId) {
     }
   }
 
-  // サーバ読み込み（完了を待つが、UIは既に表示済み）
-  const saved = await loadTaskFromServer(nextTaskId);
+  // ローカルスナップショット反映（あれば即適用）
+  const st = getLocalState(nextTaskId);
+  console.log('[main] selectTask localState:', nextTaskId, { hasLocalState: !!st });
+  if (st) {
+    if (editor) editor.getDoc().setValue(st.code || '');
+    const outEl = document.getElementById('outputArea');
+    if (outEl) outEl.textContent = st.output || '';
+    outputBuffer = String(st.output || '').replace(/\r\n/g, "\n");
+    hintOpened = !!st.hintOpened;
+    taskSubmitted[nextTaskId] = !!st.submitted;
+    setSubmitButtonState(!!taskSubmitted[nextTaskId]);
+  }
+  // === ここが変更点 ===
+  // ローカル（キャッシュ or スナップショット）に状態があればサーバ読込はスキップして通信削減
+  let saved = null;
+  const hasLocalState = !!cached || !!st;
+  console.log('[main] selectTask: hasLocalState=', hasLocalState, ' -> ', hasLocalState ? 'skip server' : 'fetch server');
+  if (!hasLocalState) {
+    // ローカルに何もないときのみサーバから取得
+    saved = await loadTaskFromServer(nextTaskId);
+    console.log('[main] selectTask: server loaded=', !!saved);
+  }
   if (currentTaskId !== requestId) {
     if (editor && editor.getOption('readOnly') === 'nocursor' && editor.getValue() === '読み込み中...') {
       editor.setOption('readOnly', false); editor.getDoc().setValue('');
@@ -565,15 +643,16 @@ async function selectTask(nextTaskId) {
       assistLabel.classList.remove('disabled');
       updateGhostVisibility();
     }
-  } else if (!cached) {
+  } else if (!cached && !st) {
     applyInitialCodeIfBlank(task);
+    console.log('[main] selectTask: applied InitialCode (no cache/state)');
   } else {
-    if (!taskSubmitted[nextTaskId] && isBlankCode(editor ? editor.getValue() : cached.code || "")) {
+    if (!taskSubmitted[nextTaskId] && (isBlankCode(editor ? editor.getValue() : cached.code || "") || ((editor ? editor.getValue() : (cached.code || "")).trim() === "読み込み中..."))) {
       applyInitialCodeIfBlank(task);
+      console.log('[main] selectTask: applied InitialCode (was blank/loading)');
     }
   }
-  if (saved && !taskSubmitted[nextTaskId] && isBlankCode(saved.code || '')) applyInitialCodeIfBlank(task);
-
+  if (saved && !taskSubmitted[nextTaskId] && (isBlankCode(saved.code || '') || String((saved.code || '').trim()) === "読み込み中...")) applyInitialCodeIfBlank(task);
   // ヒント押下：表示＋Assist「有効化だけ」（自動チェックなし）＋即保存（非同期）
   document.getElementById("hintButton").onclick = () => {
     hintEl.hidden = false;
@@ -588,6 +667,7 @@ async function selectTask(nextTaskId) {
           .catch(e => console.warn('[Main] hint save error', e));
       }
     }
+    if (currentTaskId) saveLocalState(currentTaskId);
   };
 
   updateStatusIcon(computeStatusKey(nextTaskId));
@@ -625,7 +705,7 @@ async function saveSpecificTask(taskId, data, silent = true) {
 function applyInitialCodeIfBlank(task) {
   const initial = task.initialCode || '';
   const cur = editor ? editor.getValue() : '';
-  if (!isBlankCode(cur)) return;
+  if (!isBlankCode(cur) && cur.trim() !== "読み込み中...") return;
   if (editor) editor.getDoc().setValue(initial);
   outputBuffer = ""; document.getElementById('outputArea').textContent = "";
   hintOpened = false; taskSubmitted[currentTaskId] = false; setSubmitButtonState(false); unlockEditor();
@@ -751,6 +831,7 @@ builtins.input = _custom_input`
         .catch(e => console.warn('[Main] run save error', e));
       applyResultsToList(); updateStatusBadges();
     }
+    if (currentTaskId) saveLocalState(currentTaskId);
   }
 }
 function stopCode(){
@@ -798,7 +879,7 @@ function saveToServer(silent=false, submittedFlag=false){
         if (submittedFlag) taskSubmitted[currentTaskId] = true;
         if (!silent) showStatusMessage(submittedFlag?'提出しました':'保存しました','success');
         saveToCache(currentTaskId, { code, output, hintOpened, submitted: !!taskSubmitted[currentTaskId] });
-        updateStatusIcon(computeStatusKey(currentTaskId)); applyResultsToList(); updateStatusBadges(); return;
+        updateStatusIcon(computeStatusKey(currentTaskId)); applyResultsToList(); updateStatusBadges(); if (currentTaskId) saveLocalState(currentTaskId); return;
       }
       try {
         const data = await res.json();
@@ -806,11 +887,11 @@ function saveToServer(silent=false, submittedFlag=false){
         if (ok && submittedFlag) taskSubmitted[currentTaskId] = true;
         if (!silent) showStatusMessage(ok ? (submittedFlag?'提出しました':'保存しました') : (submittedFlag?'提出に失敗しました':'保存に失敗しました'), ok?'success':'error');
         saveToCache(currentTaskId, { code, output, hintOpened, submitted: !!taskSubmitted[currentTaskId] });
-        updateStatusIcon(computeStatusKey(currentTaskId)); applyResultsToList(); updateStatusBadges();
+        updateStatusIcon(computeStatusKey(currentTaskId)); applyResultsToList(); updateStatusBadges(); if (currentTaskId) saveLocalState(currentTaskId);
       } catch (e) {
         if (res.ok){ if (submittedFlag) taskSubmitted[currentTaskId]=true; if(!silent) showStatusMessage(submittedFlag?'提出しました':'保存しました','success');
           saveToCache(currentTaskId, { code, output, hintOpened, submitted: !!taskSubmitted[currentTaskId] });
-          updateStatusIcon(computeStatusKey(currentTaskId)); applyResultsToList(); updateStatusBadges();
+          updateStatusIcon(computeStatusKey(currentTaskId)); applyResultsToList(); updateStatusBadges(); if (currentTaskId) saveLocalState(currentTaskId);
         } else { if(!silent) showStatusMessage(submittedFlag?'提出に失敗しました':'保存に失敗しました','error'); }
       }
     })
@@ -826,6 +907,7 @@ function submitToServer(){
   updateStatusIcon('submitted');
   applyResultsToList();
   updateStatusBadges();
+  if (currentTaskId) saveLocalState(currentTaskId);
 }
 
 /* ★修正箇所：提出取り消し時は、先に未提出フラグへ変更してから保存を呼ぶ */
@@ -847,6 +929,7 @@ function cancelSubmission(){
   updateStatusIcon('saved');
   applyResultsToList();
   updateStatusBadges();
+  if (currentTaskId) saveLocalState(currentTaskId);
 }
 
 function updateStatusIcon(status){ if(!currentTaskId) return; const key=(status in statusColors)?status:computeStatusKey(currentTaskId); const el=document.querySelector(`#taskList li[data-task-id='${currentTaskId}'] .task-icon`); if(el) el.style.background = statusColors[key] || statusColors.empty; }
@@ -892,3 +975,11 @@ function updatePlayStopButtons(){ const p=document.getElementById("playButton"),
 function handleSessionExpired(){ alert('セッションがタイムアウトしました。再度ログインしてください。'); clearSession(); redirectToLogin(); }
 async function safeText(res){ try { return await res.text(); } catch { return ""; } }
 function safeJson(text){ try { const cleaned=text.replace(/^[)\]\}'\s]+/,""); return JSON.parse(cleaned); } catch { return null; } }
+
+
+
+
+
+
+
+

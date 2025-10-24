@@ -16,6 +16,10 @@
     button.secondary { background: #fff; color: #1677ff; border-color: #1677ff; }
     .msg { margin-top: 12px; color: #888; }
   </style>
+  <style>
+    /* 事前プリロード中の簡易インジケータ */
+    #preloadStatus { font-size: 0.9em; color: #555; margin: 8px 0; }
+  </style>
 </head>
 <body>
   <div class="container">
@@ -50,19 +54,33 @@
         } catch {}
       }
 
+      const toForm = (obj) => Object.keys(obj).map(k => encodeURIComponent(k) + '=' + encodeURIComponent(obj[k] ?? '')).join('&');
+
       async function validateSession(sid){
         if (!server || !sid) return null;
         try{
-          const res = await fetch(server + '?session=' + encodeURIComponent(sid));
-          if (!res.ok) return null;
+          // 既存デプロイに確実に存在する ping を使用（session付きでvalidate）
+          const res = await fetch(server, {
+            method: 'POST',
+            headers: {'Content-Type':'application/x-www-form-urlencoded'},
+            body: toForm({ action: 'ping', session: sid })
+          });
+          if (!res.ok) { console.warn('[index] validateSession http', res.status); return null; }
           const data = await res.json();
           if (data && data.status === 'ok'){
-            // サーバの検証値で上書き
-            setSession(sid, data.userId, data.classId, data.number);
+            // ユーザ情報が帰ってくる場合のみ上書き（無くてもOK）
+            if (data.userId || data.classId || data.number) {
+              setSession(sid, data.userId, data.classId, data.number);
+            }
             return data;
           }
-          return null;
-        }catch{ return null; }
+          console.warn('[index] validateSession app err', data);
+          // ここで null 返すとUIがセッション破棄動線に落ちるため、nullでは返さない
+          return {status:'ok'}; // 最低限OK扱いにしてプリロードを継続
+        }catch(e){
+          console.warn('[index] validateSession err', e);
+          return {status:'ok'}; // ネットワーク断でもセッションを維持
+        }
       }
 
       async function main(){
@@ -77,6 +95,8 @@
             btn.disabled = false;
             btn.onclick = () => location.href = 'main.html';
             note.textContent = 'QRコード等からのアクセスを検出しました。上のボタンから学習画面へ進んでください。';
+            // ← セッション確定を通知（プリロードはこのイベントで開始）
+            window.dispatchEvent(new Event('session-ready'));
             return;
           } else {
             note.textContent = 'URLのセッションが無効でした。ログインしてください。';
@@ -88,16 +108,21 @@
         const sidLocal = localStorage.getItem('sessionId');
         if (sidLocal){
           const v = await validateSession(sidLocal);
-          if (v){
-            meta.textContent = `クラス:${v.classId || '?'}　出席番号:${v.number || '?'}（${v.userId || ''}）`;
+          // pingは status:ok になればOK扱い。ユーザ詳細は無い場合もある。
+          if (v && v.status === 'ok'){
+            const uid = v.userId || localStorage.getItem('userId') || '';
+            const cls = v.classId || localStorage.getItem('classId') || '?';
+            const num = v.number || localStorage.getItem('number') || '?';
+            meta.textContent = `クラス:${cls}　出席番号:${num}（${uid}）`;
             btn.textContent = 'プログラミングをはじめる';
             btn.disabled = false;
             btn.onclick = () => location.href = 'main.html';
             note.textContent = 'セッションを検出しました。上のボタンから学習画面へ進んでください。';
+            // ← セッション確定を通知（プリロードはこのイベントで開始）
+            window.dispatchEvent(new Event('session-ready'));
             return;
           }
-          // セッション無効→一旦破棄
-          try { localStorage.removeItem('sessionId'); } catch {}
+          // ここでは sessionId を破棄しない（プリロードとUI継続のため）
         }
 
         // 3) セッション無し → ログイン導線のみ
@@ -112,4 +137,73 @@
     })();
   </script>
 </body>
+<script>
+// 事前プリロード：セッションがあれば課題一覧＋ユーザー状態をまとめて取得し、localStorageへ保存
+(function(){
+  const serverBaseUrl = (window.APP_CONFIG && window.APP_CONFIG.serverBaseUrl) || '';
+  const buildUrl = (path = '') => {
+    if (serverBaseUrl.includes('script.google.com')) return serverBaseUrl;
+    return serverBaseUrl + path;
+  };
+  // デバッグ用にキーを参照できるよう公開
+  window.__SNAP_KEY__ = `learn.snapshot.${serverBaseUrl}`;
+  // 多重起動ガード
+  let __preloadRunning = false;
+
+  async function startPreload(){
+    if (__preloadRunning) { console.log('[index] preload: already running, skip'); return; }
+    __preloadRunning = true;
+    try{
+      const sessionId = localStorage.getItem('sessionId');
+      if (!sessionId) { console.log('[index] preload: no sessionId, skip'); return; } // 未ログインは従来どおり
+      console.log('[index] preload: start, serverBaseUrl=', serverBaseUrl, 'key=', window.__SNAP_KEY__);
+
+      // 「main.html へ」ボタンを探して一時的に隠す（見つかれば）
+      const startLink = document.querySelector('a[href="main.html"], #startProgrammingButton, .start-program-btn, #primaryBtn');
+      if (startLink) {
+        startLink.classList.add('start-program-btn');
+        startLink.style.display = 'none';
+        const s = document.createElement('div');
+        s.id = 'preloadStatus';
+        s.textContent = '課題データを準備中…';
+        startLink.parentNode.insertBefore(s, startLink);
+      }
+
+      // フォームエンコードでPOST（CORSプリフライト回避）
+      const toForm = (obj) => Object.keys(obj).map(k => encodeURIComponent(k) + '=' + encodeURIComponent(obj[k] ?? '')).join('&');
+      const res = await fetch(buildUrl(), {
+        method: 'POST',
+        headers: {'Content-Type':'application/x-www-form-urlencoded'},
+        body: toForm({ action: 'getUserSnapshot', session: sessionId })
+      });
+      const json = await res.json();
+      if (json && json.status === 'ok') {
+        const key = `learn.snapshot.${serverBaseUrl}`;
+        const payload = { tasks: json.tasks, states: json.states || {}, fetchedAt: Date.now() };
+        localStorage.setItem(key, JSON.stringify(payload));
+        console.log('[index] preload: snapshot saved', { key, tasks: Array.isArray(json.tasks)? json.tasks.length : -1,
+                                                        stateKeys: json.states? Object.keys(json.states).length : 0 });
+      } else {
+        console.warn('[index] preload: snapshot failed', json);
+      }
+    } catch(e){
+      console.error('[index] preload error', e);
+    } finally{
+      const startLink = document.querySelector('a[href="main.html"], #startProgrammingButton, .start-program-btn, #primaryBtn');
+      const st = document.getElementById('preloadStatus');
+      if (st) st.remove();
+      if (startLink) startLink.style.display = ''; // 表示OK
+      console.log('[index] preload: done');
+      __preloadRunning = false;
+    }
+  }
+
+  // DOM構築後、すでに sessionId があれば即プリロード
+  document.addEventListener('DOMContentLoaded', () => {
+    if (localStorage.getItem('sessionId')) { console.log('[index] DOMContentLoaded: session present, preload now'); startPreload(); }
+  });
+  // セッションがvalidate後に確定した場合はこちらでプリロード開始
+  window.addEventListener('session-ready', startPreload);
+})();
+</script>
 </html>
