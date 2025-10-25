@@ -1,0 +1,100 @@
+--- a/main.js
++++ b/main.js
+@@
+ /* ===== Utility ===== */
+ function isBlankCode(s) { return !s || String(s).replace(/[\s\u00A0\uFEFF]/g, "") === ""; }
+@@
++/* ===== Local Snapshot Utilities ===== */
++function _snapshotKey(){ return `learn.snapshot.${serverBaseUrl}`; }
++function loadSnapshot(){
++  try { return JSON.parse(localStorage.getItem(_snapshotKey()) || 'null'); }
++  catch(e){ console.warn('snapshot parse error', e); return null; }
++}
++function getLocalState(taskId){
++  const snap = loadSnapshot(); return (snap && snap.states) ? snap.states[String(taskId)] : null;
++}
++function saveLocalState(taskId){
++  try{
++    const snap = loadSnapshot() || {tasks: null, states: {}, fetchedAt: 0};
++    const code = editor ? editor.getValue() : '';
++    const output = (document.getElementById('outputArea')||{}).textContent || '';
++    const state = {
++      code: code,
++      output: output,
++      hintOpened: !!hintOpened,
++      submitted: !!taskSubmitted[currentTaskId],
++      savedAt: new Date().toISOString()
++    };
++    snap.states[String(taskId)] = state;
++    localStorage.setItem(_snapshotKey(), JSON.stringify(snap));
++  } catch(e){ console.warn('saveLocalState failed', e); }
++}
++
+ /* ===== Init ===== */
+ function init() {
+   // 既存初期化 …
+@@
+-  loadTaskListFromServer();
++  // まずローカルスナップショットがあればそれで一覧を描画（即時表示）
++  const snap = loadSnapshot();
++  if (snap && Array.isArray(snap.tasks) && snap.tasks.length > 0) {
++    const tasks = normalizeTasks(snap.tasks);
++    renderTaskList(tasks);
++  } else {
++    loadTaskListFromServer(); // フォールバック（従来どおり）
++  }
+ }
+@@
+ // ヒント押下：表示＋Assist「有効化だけ」（自動チェックなし）＋即保存（非同期）
+ document.getElementById("hintButton").onclick = () => {
+   // 既存処理 …
++  // ローカルにも即時保存
++  if (currentTaskId) saveLocalState(currentTaskId);
+ };
+@@
+ function selectTask(nextTaskId) {
+   // 既存：前課題のBG保存など…
++  // 前課題をローカル保存（切替トリガ）
++  if (currentTaskId) saveLocalState(currentTaskId);
+@@
+   // 既存：新課題のローカル表示→サーバ読込…
++  // ローカルスナップショット反映（あれば即適用）
++  const st = getLocalState(nextTaskId);
++  if (st) {
++    if (editor) editor.getDoc().setValue(st.code || '');
++    const outEl = document.getElementById('outputArea');
++    if (outEl) outEl.textContent = st.output || '';
++    hintOpened = !!st.hintOpened;
++    taskSubmitted[nextTaskId] = !!st.submitted;
++    setSubmitButtonState(!!st.submitted);
++  }
+@@
+ function runCode() {
+   // 既存：Pyodide実行…
+   // 実行後 …
++  // 実行タイミングでローカル保存
++  if (currentTaskId) saveLocalState(currentTaskId);
+ }
+@@
+ function saveToServer(silent, submittedFlag) {
+   // 既存：saveUserCode 送信…
+   return fetch(url, opt)
+     .then(r=>r.json())
+     .then(json=>{
+       // 既存：UI更新など…
++      // サーバ保存成功後にローカルも更新
++      if (currentTaskId) saveLocalState(currentTaskId);
+       return json;
+     });
+ }
+@@
+ function submitToServer() {
+   // 既存：提出フラグ保存…
++  // ローカル即時反映
++  if (currentTaskId) saveLocalState(currentTaskId);
+ }
+ function cancelSubmit() {
+   // 既存：提出取消保存…
++  // ローカル即時反映
++  if (currentTaskId) saveLocalState(currentTaskId);
+ }
