@@ -49,6 +49,59 @@ const taskSubmitted = Object.create(null);
 let outputBuffer = "";
 
 /* ===== Utility ===== */
+/**
+ * コーディングアシスト要素を検出して、見た目を濃くし、エディタのスクロールに追従させる
+ * - CodeMirror 5/6 を自動判別してスクロール同期
+ * - よくあるID/クラス名を列挙して既存要素を探す（存在しなければ何もしない）
+ */
+function enhanceCodingAssistFollow(){
+  // 候補セレクタ（環境に合わせて増減可：既存のアシスト領域を検出する）
+  const candidates = [
+    '#codingAssist', '.coding-assist', '#assistPanel', '#assistOverlay', '#assist', '[data-role="coding-assist"]'
+  ];
+  let assistEl = null;
+  for (const sel of candidates){
+    const el = document.querySelector(sel);
+    if (el){ assistEl = el; break; }
+  }
+  if (!assistEl){ return; } // 見つからなければ何もしない（副作用なし）
+
+  // 見た目を強調
+  assistEl.classList.add('coding-assist-boost', 'coding-assist-follow');
+
+  // CodeMirror のスクロール要素を特定
+  // CM5: editor.getScrollerElement()
+  // CM6: editor.contentDOM / editor.scrollDOM（実装により異なる）
+  let scroller = null;
+  try {
+    if (editor && typeof editor.getScrollerElement === 'function') {
+      scroller = editor.getScrollerElement(); // CM5
+    }
+  } catch(_) {}
+  if (!scroller){
+    // 汎用フォールバック（CM6想定）
+    scroller = document.querySelector('.cm-editor .cm-scroller, .cm-editor .cm-content') ||
+               document.querySelector('.cm-editor') ||
+               document.querySelector('.CodeMirror-scroll, .CodeMirror-sizer') ||
+               document.getElementById('editor'); // 最後の保険
+  }
+  if (!scroller){ return; }
+
+  // 右上にピン留めするイメージ：スクロール量に応じて逆方向へtranslateし、表示位置を固定する
+  const sync = () => {
+    const st = scroller.scrollTop || 0;
+    const sl = scroller.scrollLeft || 0;
+    // スクロールで流れてしまうのを相殺（見た目としては固定）
+    assistEl.style.transform = `translate(${sl}px, ${st}px)`;
+  };
+
+  // 初期配置
+  sync();
+  // スクロール/リサイズに追従
+  scroller.addEventListener('scroll', sync, { passive: true });
+  window.addEventListener('resize', sync);
+}
+
 function isBlankCode(s) { return !s || String(s).replace(/[\s\u00A0\uFEFF]/g, "") === ""; }
 function log(...a){ console.log("[Learn]", ...a); }
 function buildUrl(path) {
@@ -168,6 +221,8 @@ async function init() {
     }
   }
   showNoSelectionState(); // 初期ガイダンス表示
+  // エディタが初期化された後に追従を有効化
+  try { enhanceCodingAssistFollow(); } catch(e){ console.warn('assist follow init failed', e); }
 }
 
 function showNoSelectionState() {
@@ -798,27 +853,88 @@ async function runCode() {
   running = true; updatePlayStopButtons();
   if (interruptBuffer) interruptBuffer[0] = 0; enableSaveSubmitButtons();
   try {
-    const inputCalls = [...code.matchAll(/\binput\s*\(([^)]*)\)/g)];
-    let inputQueue = [];
-    if (inputCalls.length > 0) {
-      const prompts = inputCalls.map(m => { const a = (m[1]||"").trim(); const sm=a.match(/^['"](.*)['"]$/); return sm?sm[1]:""; });
-      inputQueue = await collectInputs(prompts);
-      pyodide.globals.set("__input_values", inputQueue);
-      await pyodide.runPythonAsync(
-`import builtins
-_values_iter = iter(__input_values)
-def _custom_input(prompt=""):
-    try:
-        return next(_values_iter)
-    except StopIteration:
-        raise EOFError
-builtins.input = _custom_input`
-      );
+    const outEl = document.getElementById("outputArea") || document.getElementById("output");
+    const scrollToBottom = () => { if (outEl) outEl.scrollTop = outEl.scrollHeight; };
+
+    // 出力エコー：
+    // 1) CRLF→LF 正規化
+    // 2) リテラル "\\n" → 実改行に復元
+    // 3) 末尾が改行でなければ改行を補って表示（printの改行を保証）
+    const __safeAppend = (text) => {
+      let t = String(text);
+      t = t.replace(/\r\n/g, "\n");
+      t = t.replace(/\\n/g, "\n");
+      if (!t.endsWith("\n")) {
+        appendOutput(t + "\n");
+      } else {
+        appendOutput(t);
+      }
+      scrollToBottom();
+    };
+    pyodide.setStdout({ batched: __safeAppend });
+    pyodide.setStderr({ batched: __safeAppend });
+    // Python から呼ぶ出力関数（プロンプト表示に使う）
+    window.__append_output = (text) => { appendOutput(String(text)); };
+
+    // --- ここから input() の差し替え ---
+    // JS → Python への入力ブリッジ
+    window._waitForInput = null;
+    window._resolveInput = null;
+
+    // 出力欄に入力欄を出して、入力完了まで待機する Promise
+    function showInputField(promptText) {
+      return new Promise((resolve) => {
+        const wrap = document.createElement("span");
+        wrap.className = "inline-input";
+        const input = document.createElement("input");
+        input.type = "text";
+        input.autocomplete = "off";
+        // 入力欄は常に空欄（プレースホルダを出さない）
+        input.placeholder = "";
+        wrap.appendChild(input);
+        // プロンプト文字列は Python 側で js.__append_output により既に出力済み（改行なし）
+        // ここでは「横の入力欄」だけ追加する
+        outEl.appendChild(wrap);
+        input.focus();
+        scrollToBottom();
+        const submit = () => {
+          const val = input.value ?? "";
+          wrap.remove();
+          appendOutput(val + "\n");  // 入力値は実際の改行で出力に残す
+          scrollToBottom();
+          resolve(val);
+        };
+        input.addEventListener("keydown", e => { if (e.key === "Enter") submit(); });
+      });
     }
-    pyodide.setStdout({ batched:(s)=>{ appendOutput(s+"\n"); } });
-    pyodide.setStderr({ batched:(s)=>{ appendOutput(s+"\n"); } });
-    pyodide.setStdin({ stdin:()=>{ if (inputQueue.length===0) return undefined; const v=inputQueue.shift(); return v+"\n"; }, isatty:false });
-    await pyodide.runPythonAsync(code);
+
+    // Python から js.show_input_field(...) で呼べるように、グローバルへ公開
+    window.show_input_field = showInputField;
+
+    // ==== ここから：同期 input を「await できる input」に機械変換して async 包で実行 ====
+    // 1) input( を await __await_input__( に置換（識別子の一部は除外）
+    const patched = code.replace(/(^|[^A-Za-z0-9_])input\s*\(/g, '$1await __await_input__(');
+    // 2) 行ごとにインデントを付けて __user_main に包む（全コードを関数内に確実に収める）
+    const body = patched.split('\n').map(line => '    ' + line).join('\n');
+    const wrapped = `
+import js, asyncio
+async def __await_input__(prompt=""):
+    p = str(prompt) if prompt is not None else ""
+    if p:
+        # 改行せずプロンプトを出力欄に出す
+        try:
+            js.__append_output(p)
+        except Exception:
+            pass
+    # 出力欄の「横入力」UIで入力を取得（Promise を await）
+    v = await js.show_input_field(p)
+    # 入力文字列自体は JS 側で出力欄に append済み（残す仕様）
+    return str(v)
+async def __user_main():
+${body}
+await __user_main()
+`;
+    await pyodide.runPythonAsync(wrapped);
   } catch (err) { appendOutput(err.toString()+"\n"); }
   finally {
     running=false; updatePlayStopButtons();

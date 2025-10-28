@@ -140,10 +140,11 @@
   padding: 5px;
   pointer-events: none;
   white-space: pre;
-  color: #bbb;
+  color: #999;
   font-family: monospace;
   font-size: 14px;
-  opacity: 0.25; /* コーディングアシストをさらに薄く表示する */
+  opacity: 0.55;          /* 濃さを上げて視認性UP */
+  overflow: hidden;       /* ← これで要素がスクロールコンテナになり、scrollTop/Left 同期が効く */
 }
 /* CodeMirror instance styling */
 .CodeMirror {
@@ -266,4 +267,63 @@
   align-items: center;
   gap: 0.3rem;
   font-size: 0.9rem;
+}
+/* ===== Coding Assist: 目立たせる（濃くする）＋視認性強化 ===== */
+/* 対象要素に .coding-assist-boost を付与して適用（JS側で自動付与） */
+.coding-assist-boost{
+  /* 背景をやや濃く（ライト/ダーク双方で視認性UP） */
+  background: rgba(0,0,0,0.72);
+  color: #fff;
+  border: 1px solid rgba(255,255,255,0.25);
+  /* 角丸・内外シャドウで浮かせる */
+  border-radius: 10px;
+  box-shadow:
+    0 1px 2px rgba(0,0,0,0.25),
+    0 8px 24px rgba(0,0,0,0.18);
+  /* 文字のにじみを抑える */
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  /* 余白を少しだけ増やす（読みやすさ優先・既存サイズは維持） */
+  padding: 10px 12px;
+}
+
+/* 追従用の土台（JS側で position/transform を制御） */
+.coding-assist-follow {
+  position: absolute;          /* editorのスクロール領域内で絶対配置 */
+  z-index: 25;                 /* コードより手前に出す（必要に応じ調整） */
+  /* もともと右上固定の想定。transformでスクロールを相殺するのでtop/rightは可読性のため */
+  top: 8px;
+  right: 8px;
+  pointer-events: auto;        /* ボタン等が押せるように */
+}
+
+/* アニメのカクつきを抑える（変換をGPUコンポジットに） */
+.coding-assist-follow,
+.coding-assist-follow * {
+  will-change: transform;
+}
+/* 出力エリア内のインライン入力 */
+.inline-input {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.inline-input > input[type="text"] {
+  font: inherit;
+  padding: 2px 6px;
+  border: 1px solid #bbb;
+  border-radius: 6px;
+  outline: none;
+}
+.inline-input > button {
+  font: inherit;
+  padding: 2px 8px;
+  border: 1px solid #888;
+  border-radius: 6px;
+  background: #f0f0f0;
+  cursor: pointer;
+}
+.inline-input > input[type="text"]:focus {
+  border-color: #1677ff;
+  box-shadow: 0 0 0 2px rgba(22,119,255,.15);
 }
