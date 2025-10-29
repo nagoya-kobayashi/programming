@@ -11,6 +11,140 @@ let userNumber = "";
 let userId = "";
 let sessionId = "";
 
+/* ===== Worker 実行用の状態 ===== */
+let pyWorker = null;
+let workerReady = false;
+let workerInitPromise = null;
+let workerCanInterrupt = false; // SharedArrayBuffer による割り込み可否
+const IS_FILE_ORIGIN = (location.protocol === 'file:');
+// stdout に流す入力要求マーカー（フォールバック用）
+const INPUT_MARK = '<<<INPUT>>>';
+let awaitingInputUI = false; // 二重UI防止
+// メインスレッド実行時用：JS側で入力UIを出し、その結果をPromiseで返す関数をPythonからawaitする
+// （Worker実行時は使われず、従来の postMessage / stdout マーカーで動作）
+window.__input_async = function(promptText){
+  // 連打防止：既に入力待ちならその完了を待つ
+  if (awaitingInputUI) {
+    return new Promise((resolve) => {
+      const chk = setInterval(() => {
+        if (!awaitingInputUI) {
+          clearInterval(chk);
+          resolve(window.__input_async(promptText));
+        }
+      }, 10);
+    });
+  }
+  awaitingInputUI = true;
+  pauseExecTimer(); // 入力待ちはタイマー停止
+  return new Promise((resolve) => {
+    showInlineInput(String(promptText || '')).then((val) => {
+      resumeExecTimer();
+      awaitingInputUI = false;
+      resolve(String(val ?? ''));
+    });
+  });
+};
+
+
+// stdout 正規化: 改行を保証し、CRLF→LF 変換＆リテラル "\\n" → 実改行も復元
+function appendStdoutNormalized(text){
+  let t = String(text);
+  t = t.replace(/\r\n/g, "\n");
+  t = t.replace(/\\n/g, "\n");
+  if (!t.endsWith("\n")) t += "\n";
+  appendOutput(t);
+}
+
+// file:// で外部 worker を読めない環境向け：インラインWorkerのソース生成（正規表現置換は使わない）
+function buildInlineWorkerSource(){
+  return [
+    "// inline py_worker (blob)",
+    "let pyodide=null; let interruptBuffer=null; let running=false;",
+    "self.onmessage=async(ev)=>{",
+    "  const msg=ev.data||{};",
+    "  try{",
+    "    if(msg.type==='init'){",
+    "      if(!pyodide){",
+    "        importScripts('https://cdn.jsdelivr.net/pyodide/v0.22.1/full/pyodide.js');",
+    "        pyodide=await loadPyodide();",
+    "        pyodide.setStdout({batched:(s)=>postMessage({type:'stdout',data:s})});",
+    "        pyodide.setStderr({batched:(s)=>postMessage({type:'stderr',data:s})});",
+    "      }",
+    "      try{",
+    "        if(typeof SharedArrayBuffer!=='undefined' && pyodide.setInterruptBuffer && !interruptBuffer){",
+    "          interruptBuffer=new Int32Array(new SharedArrayBuffer(4));",
+    "          pyodide.setInterruptBuffer(interruptBuffer);",
+    "        }",
+    "      }catch(e){}",
+    "      postMessage({type:'log', message:'pyodide ready (inline worker)'});",
+    "      postMessage({type:'ready', canInterrupt: !!interruptBuffer});",
+    "      return;",
+    "    }",
+    "    if(msg.type==='stop'){ try{ if(interruptBuffer) interruptBuffer[0]=2; }catch(e){} return; }",
+    "    if(msg.type==='input_response'){",
+    "      const v=String(msg.value ?? '');",
+    "      // v を安全に Python 文字列リテラル化してキューへ投入",
+    "      await pyodide.runPythonAsync('import asyncio\\n__input_queue.put_nowait(' + JSON.stringify(v) + ')');",
+    "      return;",
+    "    }",
+    "    if(msg.type==='run'){",
+    "      if(!pyodide){ postMessage({type:'error',message:'Pyodide not ready'}); return; }",
+    "      if(running){ postMessage({type:'error',message:'already running'}); return; }",
+    "      running=true;",
+    "      try{",
+    "        const userCode=String(msg.code||'');",
+    "        const body=userCode.split('\\n').map(l=>'    '+l).join('\\n');",
+    "        const patched=body.replace(/(^|[^A-Za-z0-9_])input\\s*\\(/g,'$1await __await_input__(');",
+    "        const wrapped=(",
+    "          'import js, asyncio\\n'+",
+    "          '__input_queue = asyncio.Queue()\\n'+",
+    "          'async def __await_input__(prompt=\"\"):\\n'+",
+    "          '    p = str(prompt) if prompt is not None else \"\"\\n'+",
+    "          '    # 通常: JS メッセージ\\n'+",
+    "          '    try:\\n'+",
+    "          '        js.postMessage({ \"type\":\"input_request\", \"prompt\": p })\\n'+",
+    "          '    except Exception as _e:\\n'+",
+    "          '        pass\\n'+",
+    "          '    # フォールバック: stdout にマーカーを流してメインが検出（改行で flush）\\n'+",
+    "          '    print(\"<<<INPUT>>>\"+p)\\n'+",
+    "          '    v = await __input_queue.get()\\n'+",
+    "          '    return str(v)\\n'+",
+    "          'async def __user_main():\\n'+",
+    "          patched+'\\n'+",
+    "          'await __user_main()\\n'",
+    "        );",
+    "        await pyodide.runPythonAsync(wrapped);",
+    "        postMessage({type:'done'});",
+    "      }catch(e){",
+    "        const m=String(e||'');",
+    "        if(m.includes('KeyboardInterrupt')) postMessage({type:'stopped'});",
+    "        else postMessage({type:'error',message:m});",
+    "      }finally{",
+    "        try{ if(interruptBuffer) interruptBuffer[0]=0; }catch(e){}",
+    "        running=false;",
+    "      }",
+    "      return;",
+    "    }",
+    "  }catch(e){ postMessage({type:'error',message:String(e||'worker error')}); }",
+    "};"
+  ].join("\\n");
+}
+
+function getWorkerUrl(){
+  if (!IS_FILE_ORIGIN) return 'py_worker.js'; // HTTP/HTTPS では従来通り外部ファイル
+  try{
+    const src = buildInlineWorkerSource();
+  // Edge/Chrome の file:// では MIME を text/javascript にした方が安定
+  const blob = new Blob([src], { type: 'text/javascript' });
+    const url  = URL.createObjectURL(blob);
+    console.log('[Main] inline worker fallback (file://) enabled');
+    return url;
+  }catch(e){
+    console.warn('[Main] inline worker fallback failed', e);
+    return 'py_worker.js';
+  }
+}
+
 // 採点結果
 let resultsData = {};
 
@@ -203,10 +337,11 @@ async function init() {
 
   // 割り込みバッファ
   if (typeof SharedArrayBuffer !== 'undefined') {
-    interruptBuffer = new Uint8Array(new SharedArrayBuffer(1));
+    // Pyodide は Int32Array を想定。0:通常 / 2:KeyboardInterrupt
+    interruptBuffer = new Int32Array(new SharedArrayBuffer(4));
     if (pyodide.setInterruptBuffer) pyodide.setInterruptBuffer(interruptBuffer);
   }
-
+  
   // エディタ・操作系
   initEditor();
   setupControls();
@@ -253,8 +388,8 @@ function showNoSelectionState() {
   updateGhostVisibility();
 
   // 実行/保存/提出は一旦無効（課題未選択なので）
-  const runBtn = document.getElementById("runButton");
-  const stopBtn = document.getElementById("stopButton");
+  const runBtn = document.getElementById("playButton");
+  const stopBtn = document.getElementById("stopIconButton");
   const saveBtn = document.getElementById("saveButton");
   const submitBtn = document.getElementById("submitButton");
   if (runBtn) runBtn.disabled = true;
@@ -826,8 +961,8 @@ function setupControls() {
 }
 function disableSaveButton(){ document.getElementById("saveButton").disabled = true; }
 function enableSaveSubmitButtons(){
-  const runBtn = document.getElementById("runButton");
-  const stopBtn = document.getElementById("stopButton");
+  const runBtn = document.getElementById("playButton");
+  const stopBtn = document.getElementById("stopIconButton");
   const saveBtn = document.getElementById("saveButton");
   const submitBtn = document.getElementById("submitButton");
   if (runBtn) runBtn.disabled = false;
@@ -843,102 +978,123 @@ function showStatusMessage(msg, type='success') {
   if (statusTimerId) clearTimeout(statusTimerId);
   statusTimerId = setTimeout(()=>{ div.textContent=''; div.classList.remove('success','error'); statusTimerId=null; }, 10000);
 }
-
-async function runCode() {
-  clearOutput(); enableSaveSubmitButtons();
-  let code = editor ? editor.getValue() : '';
-  const indentSize = editor && editor.getOption ? editor.getOption('indentUnit') || 4 : 4;
-  code = code.replace(/\t/g, ' '.repeat(indentSize));
-  if (!code.trim()) { appendOutput("実行するコードがありません。\n"); return; }
-  running = true; updatePlayStopButtons();
-  if (interruptBuffer) interruptBuffer[0] = 0; enableSaveSubmitButtons();
+/* ===== 実行タイムアウト（入力待ちはカウントしない） ===== */
+// 10秒で自動停止（必要に応じて変更可）。0で無効化。
+const EXEC_TIMEOUT_MS = 10000;
+let __execTimeoutId = null;
+let __timeoutTriggered = false;
+let __remainingMs = 0;
+let __segmentStartMs = 0;
+function _clearExecTimer(){ try{ clearTimeout(__execTimeoutId); }catch{} __execTimeoutId=null; }
+function _triggerTimeout(){
+  __timeoutTriggered = true;
   try {
-    const outEl = document.getElementById("outputArea") || document.getElementById("output");
-    const scrollToBottom = () => { if (outEl) outEl.scrollTop = outEl.scrollHeight; };
-
-    // 出力エコー：
-    // 1) CRLF→LF 正規化
-    // 2) リテラル "\\n" → 実改行に復元
-    // 3) 末尾が改行でなければ改行を補って表示（printの改行を保証）
-    const __safeAppend = (text) => {
-      let t = String(text);
-      t = t.replace(/\r\n/g, "\n");
-      t = t.replace(/\\n/g, "\n");
-      if (!t.endsWith("\n")) {
-        appendOutput(t + "\n");
-      } else {
-        appendOutput(t);
-      }
-      scrollToBottom();
-    };
-    pyodide.setStdout({ batched: __safeAppend });
-    pyodide.setStderr({ batched: __safeAppend });
-    // Python から呼ぶ出力関数（プロンプト表示に使う）
-    window.__append_output = (text) => { appendOutput(String(text)); };
-
-    // --- ここから input() の差し替え ---
-    // JS → Python への入力ブリッジ
-    window._waitForInput = null;
-    window._resolveInput = null;
-
-    // 出力欄に入力欄を出して、入力完了まで待機する Promise
-    function showInputField(promptText) {
-      return new Promise((resolve) => {
-        const wrap = document.createElement("span");
-        wrap.className = "inline-input";
-        const input = document.createElement("input");
-        input.type = "text";
-        input.autocomplete = "off";
-        // 入力欄は常に空欄（プレースホルダを出さない）
-        input.placeholder = "";
-        wrap.appendChild(input);
-        // プロンプト文字列は Python 側で js.__append_output により既に出力済み（改行なし）
-        // ここでは「横の入力欄」だけ追加する
-        outEl.appendChild(wrap);
-        input.focus();
-        scrollToBottom();
-        const submit = () => {
-          const val = input.value ?? "";
-          wrap.remove();
-          appendOutput(val + "\n");  // 入力値は実際の改行で出力に残す
-          scrollToBottom();
-          resolve(val);
-        };
-        input.addEventListener("keydown", e => { if (e.key === "Enter") submit(); });
-      });
+    // Worker 実行時は stop メッセージで KeyboardInterrupt を誘発
+    if (pyWorker) {
+      pyWorker.postMessage({ type: 'stop' });
+    } else if (window.interruptBuffer) {
+      window.interruptBuffer[0] = 2;
     }
+  } catch(e){ console.warn('[Main] timeout interrupt error', e); }
+}
+function startExecTimer(){
+  __timeoutTriggered = false;
+  if (EXEC_TIMEOUT_MS <= 0) return;
+  __remainingMs = EXEC_TIMEOUT_MS;
+  __segmentStartMs = Date.now();
+  _clearExecTimer();
+  __execTimeoutId = setTimeout(_triggerTimeout, __remainingMs);
+}
+function pauseExecTimer(){
+  if (EXEC_TIMEOUT_MS <= 0 || __timeoutTriggered) return;
+  const now = Date.now();
+  const elapsed = Math.max(0, now - __segmentStartMs);
+  __remainingMs = Math.max(0, __remainingMs - elapsed);
+  _clearExecTimer();
+}
+function resumeExecTimer(){
+  if (EXEC_TIMEOUT_MS <= 0 || __timeoutTriggered) return;
+  if (__remainingMs <= 0) { _triggerTimeout(); return; }
+  __segmentStartMs = Date.now();
+  _clearExecTimer();
+  __execTimeoutId = setTimeout(_triggerTimeout, __remainingMs);
+}
+/* ===== Pyodide 実行を Web Worker に委譲 ===== */
+function ensurePyWorker(){
+  if (pyWorker && workerReady) return workerInitPromise;
+  workerInitPromise = new Promise((resolve, reject) => {
+    try{
+      // file:// の場合は Blob URL ワーカーへフォールバック
+      pyWorker = new Worker(getWorkerUrl());
+      // Worker 側の実行エラーを可視化
+      pyWorker.onerror = (e) => {
+        console.error('[Worker error]', e.message, e.filename, e.lineno, e.colno);
+      };      pyWorker.onmessage = async (ev) => {
+        const msg = ev.data || {};
+        switch(msg.type){
+          case 'ready':
+            workerReady = true;
+            workerCanInterrupt = !!msg.canInterrupt;
+            if (readyTimer) { clearTimeout(readyTimer); readyTimer = null; }
+            resolve();
+            break;
+          case 'log':
+            console.log('[Worker]', msg.message);
+            break;
+          case 'stdout': {
+            await handleStdoutChunk(String(msg.data || ''));
+            break;
+          }          case 'stderr':
+            appendStdoutNormalized(String(msg.data || '')); break;
+          case 'input_request': { // 入力待ちはタイマー停止→入力→再開
+            if (!awaitingInputUI) {
+              awaitingInputUI = true;
+              pauseExecTimer();
+              const val = await showInlineInput(String(msg.prompt || ''));
+              resumeExecTimer();
+              pyWorker.postMessage({ type: 'input_response', value: val });
+              awaitingInputUI = false;
+            }
+            break;
+          }
+          case 'stopped':
+            if (__timeoutTriggered) {
+              appendOutput(`時間超過（${Math.round(EXEC_TIMEOUT_MS/1000)}秒）で実行を停止しました。\n`);
+            } else {
+              appendOutput("実行を中断しました（KeyboardInterrupt）。\n");
+            }
+            cleanupAfterRun();
+            break;
+          case 'done':
+            cleanupAfterRun();
+            break;
+          case 'error':
+            appendOutput(String(msg.message || '実行エラー') + '\n');
+            cleanupAfterRun();
+            break;
+        }
+      };
+      // Worker の ready を待つが、来なければフォールバック
+      var readyTimer = setTimeout(() => {
+        if (!workerReady) {
+          console.warn('[Main] worker init timeout → fallback to main-thread execution');
+          try { pyWorker.terminate(); } catch {}
+          pyWorker = null; // 明示的に無効化
+          reject(new Error('worker-timeout'));
+        }
+      }, 2500);
+      pyWorker.postMessage({ type: 'init' });
+    }catch(e){ reject(e); }
+  });
+  return workerInitPromise;
+}
 
-    // Python から js.show_input_field(...) で呼べるように、グローバルへ公開
-    window.show_input_field = showInputField;
-
-    // ==== ここから：同期 input を「await できる input」に機械変換して async 包で実行 ====
-    // 1) input( を await __await_input__( に置換（識別子の一部は除外）
-    const patched = code.replace(/(^|[^A-Za-z0-9_])input\s*\(/g, '$1await __await_input__(');
-    // 2) 行ごとにインデントを付けて __user_main に包む（全コードを関数内に確実に収める）
-    const body = patched.split('\n').map(line => '    ' + line).join('\n');
-    const wrapped = `
-import js, asyncio
-async def __await_input__(prompt=""):
-    p = str(prompt) if prompt is not None else ""
-    if p:
-        # 改行せずプロンプトを出力欄に出す
-        try:
-            js.__append_output(p)
-        except Exception:
-            pass
-    # 出力欄の「横入力」UIで入力を取得（Promise を await）
-    v = await js.show_input_field(p)
-    # 入力文字列自体は JS 側で出力欄に append済み（残す仕様）
-    return str(v)
-async def __user_main():
-${body}
-await __user_main()
-`;
-    await pyodide.runPythonAsync(wrapped);
-  } catch (err) { appendOutput(err.toString()+"\n"); }
-  finally {
-    running=false; updatePlayStopButtons();
-    // 実行後に保存（出力を含めた最新状態）— 非同期でUIを止めない
+function cleanupAfterRun(){
+  try { _clearExecTimer(); } catch {}
+  try { if (interruptBuffer) interruptBuffer[0] = 0; } catch {}
+  running=false; updatePlayStopButtons();
+  // 実行後の自動保存（既存仕様）
+  try {
     if (currentTaskId && !taskSubmitted[currentTaskId]) {
       const codeNow = editor ? editor.getValue() : '';
       const outNow  = outputBuffer;
@@ -948,12 +1104,196 @@ await __user_main()
       applyResultsToList(); updateStatusBadges();
     }
     if (currentTaskId) saveLocalState(currentTaskId);
+  } catch(e){}
+}
+
+// stdout を監視して、INPUT_MARK を“行単位”で検出して UI を出す
+async function handleStdoutChunk(s){
+  // マーカーが無ければ正規化して出力（改行保証）
+  if (!s.includes(INPUT_MARK)) { appendStdoutNormalized(s); return; }
+  let rest = s;
+  // 同一チャンクに通常出力とマーカーが混在しても取りこぼさない
+  while (true) {
+    const idx = rest.indexOf(INPUT_MARK);
+    if (idx < 0) { appendStdoutNormalized(rest); break; }
+    // マーカー前はそのまま出力
+    const before = rest.slice(0, idx);
+    if (before) appendStdoutNormalized(before);
+    // マーカー行（<<<INPUT>>><prompt>\n）の prompt を抜き出す
+    const afterMark = rest.slice(idx + INPUT_MARK.length);
+    const nl = afterMark.indexOf("\n");
+    const prompt = nl >= 0 ? afterMark.slice(0, nl) : afterMark;  // 改行が無い場合も一応対応
+    // 入力 UI（多重起動防止）
+    if (!awaitingInputUI) {
+      awaitingInputUI = true;
+      pauseExecTimer();
+      const val = await showInlineInput(String(prompt || ''));
+      resumeExecTimer();
+      if (pyWorker) {
+        pyWorker.postMessage({ type: 'input_response', value: val });
+      } else {
+        try { await pyodide.runPythonAsync(`__input_queue.put_nowait(${JSON.stringify(String(val))})`); } catch(_){}
+      }
+      awaitingInputUI = false;
+    }
+    // 残り（マーカー行の“次の文字”から）を続けて処理
+    rest = nl >= 0 ? afterMark.slice(nl + 1) : "";
+    if (!rest) break;
   }
 }
+
+
+// 出力欄に「横入力欄」を出して Enter で解決（既存仕様を関数化）
+async function showInlineInput(promptText){
+  const outEl = document.getElementById("outputArea") || document.getElementById("output");
+  const scrollToBottom = () => { if (outEl) outEl.scrollTop = outEl.scrollHeight; };
+  if (promptText) appendOutput(String(promptText)); // 左側にプロンプト表示（改行なし）
+  return new Promise((resolve) => {
+    const wrap = document.createElement("span");
+    wrap.className = "inline-input";
+    const input = document.createElement("input");
+    input.type = "text";
+    input.autocomplete = "off";
+    input.placeholder = "";
+    wrap.appendChild(input);
+    outEl.appendChild(wrap);
+    input.focus();
+    scrollToBottom();
+    const submit = () => {
+      const val = input.value ?? "";
+      wrap.remove();
+      appendOutput(val + "\n"); // 入力値は改行付きで残す
+      scrollToBottom();
+      resolve(val);
+    };
+    input.addEventListener("keydown", e => { if (e.key === "Enter") submit(); });
+  });
+}
+
+async function runCode() {
+  clearOutput(); enableSaveSubmitButtons();
+  let code = editor ? editor.getValue() : '';
+  const indentSize = editor && editor.getOption ? editor.getOption('indentUnit') || 4 : 4;
+  code = code.replace(/\t/g, ' '.repeat(indentSize));
+  if (!code.trim()) { appendOutput("実行するコードがありません。\n"); return; }
+  running = true; updatePlayStopButtons();
+  if (interruptBuffer) interruptBuffer[0] = 0; enableSaveSubmitButtons();
+  startExecTimer();  // 入力待ちは pause/resume される
+  // 先に input() を確実に await へ置換（Worker 側の置換失敗に備える）
+  const prePatchedCode = code.replace(/(^|[^A-Za-z0-9_])input\s*\(/g, '$1await __await_input__(');
+  const isPrePatched   = prePatchedCode !== code;
+  // Worker 初期化に失敗したら main-thread 実行へフォールバック
+  try {
+    await ensurePyWorker();
+    // 実行依頼（前置換済みかどうかを通知）
+    pyWorker.postMessage({ type: 'run', code: prePatchedCode, prePatched: isPrePatched });
+  } catch (e) {
+    console.warn('[Main] worker unavailable, fallback to main-thread run:', e && e.message);
+    await runCodeInMainThread(prePatchedCode); // フォールバック時も前置換済みを使う
+  }
+}
+
+/**
+ * Worker が使えない環境(file:// 等)向けフォールバック実行
+ * - stdout/stderr をメインで受けて handleStdoutChunk を通す（INPUT_MARK 検出で input UI）
+ * - 停止ボタン／10秒タイムアウトは main-thread の interruptBuffer で継続利用
+ */
+async function runCodeInMainThread(userCode){
+  try {
+    // Pyodide が未ロードの環境でも自己ロードしてから実行
+    await ensurePyodideMain();
+    // 出力をフック（print や フォールバック input マーカーを拾う）
+    if (pyodide && pyodide.setStdout) {
+      pyodide.setStdout({ batched: (s) => { handleStdoutChunk(String(s)); } });
+    }
+    if (pyodide && pyodide.setStderr) {
+      pyodide.setStderr({ batched: (s) => { appendStdoutNormalized(String(s)); } });
+    }
+    const body = String(userCode||'').split('\n').map(l => '    ' + l).join('\n');
+    const wrapped = [
+      'import js, asyncio',
+      '__input_queue = asyncio.Queue()',
+      'async def __await_input__(prompt=""):',
+      '    p = str(prompt) if prompt is not None else ""',
+      '    # メインスレッドではJSのPromiseをawaitして値を受け取る（再入・競合を防ぐ）',
+      '    v = await js.__input_async(p)',
+      '    return str(v)',
+      'async def __user_main():',
+      body,  // 既に前置換済みの文字列をそのまま使う
+      'await __user_main()'
+    ].join('\n');
+    await pyodide.runPythonAsync(wrapped);
+    cleanupAfterRun();
+  } catch (err) {
+    appendOutput(String(err||'実行エラー') + '\n');
+    cleanupAfterRun();
+  }
+}
+// メインスレッド用 Pyodide を必要時だけロード
+async function ensurePyodideMain(){
+  if (pyodide) return;
+  let chosenSrc = null;
+  // file:// でも動かすために複数候補を順に試す（CDN → ローカル）
+  const candidates = [
+    'https://cdn.jsdelivr.net/pyodide/v0.22.1/full/pyodide.js',
+    './pyodide/pyodide.js',
+    './pyodide.js'
+  ];
+  if (typeof loadPyodide === 'undefined') {
+    let lastErr = null;
+    for (const src of candidates) {
+      try {
+        await new Promise((resolve, reject) => {
+          const s = document.createElement('script');
+          s.src = src;
+          s.onload = resolve; s.onerror = reject;
+          document.head.appendChild(s);
+        });
+        chosenSrc = src;
+        console.log('[Main] ensurePyodideMain: loaded script from', src);
+        break;
+      } catch (e) {
+        lastErr = e;
+        console.warn('[Main] ensurePyodideMain: failed loading', src, e);
+      }
+    }
+    if (!chosenSrc) {
+      throw new Error('pyodide.js could not be loaded from any source');
+    }
+  }
+  // indexURL を適切に指定（CDN or ローカル）
+  let indexURL = 'https://cdn.jsdelivr.net/pyodide/v0.22.1/full/';
+  if (chosenSrc && !/^https?:/i.test(chosenSrc)) {
+    // ローカル pyodide.js の場所からベースURLを推定
+    const a = document.createElement('a'); a.href = chosenSrc;
+    const base = a.href.replace(/[^/]+$/, ''); // ファイル名を除いたディレクトリURL
+    indexURL = base;
+  }
+  console.log('[Main] ensurePyodideMain: loadPyodide({ indexURL:', indexURL, '})');
+  pyodide = await loadPyodide({ indexURL });
+  console.log('[Main] ensurePyodideMain: pyodide ready');
+}
+
 function stopCode(){
-  if (interruptBuffer){ interruptBuffer[0]=2; appendOutput("\n実行を停止しました。\n"); }
-  else appendOutput("\nこの環境では停止機能は利用できません。\n");
-  running=false; updatePlayStopButtons();
+  try{
+    if (pyWorker) {
+      if (workerCanInterrupt) {
+        // 共有メモリ割り込みが使える場合は KeyboardInterrupt を送る
+        pyWorker.postMessage({ type: 'stop' });
+      } else {
+        // 共有メモリが使えない環境ではワーカーを強制終了して即停止
+        pyWorker.terminate();
+        pyWorker = null;
+        workerReady = false;
+        appendOutput("実行を中断しました（環境制約によりワーカーを再起動）。\n");
+        cleanupAfterRun();
+      }
+      return;
+    }
+  }catch{
+    if (interruptBuffer){ interruptBuffer[0]=2; appendOutput("\n実行を停止しました。\n"); }
+    else appendOutput("\nこの環境では停止機能は利用できません。\n");
+  }
 }
 
 /* 出力 */
