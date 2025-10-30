@@ -212,7 +212,7 @@
             show(stepId, false);
             show(stepPw, true);
             if (!window.isSecureContext || !hasSubtle) {
-              secHintPw.textContent = 'HTTP接続のため、JS実装でハッシュ化して送信します（HTTPSを推奨）。';
+              secHintPw.textContent = 'HTTP接続のため、JS実装でハッシュ化して送信します。';
             }
             pwInput.focus();
           } else {
