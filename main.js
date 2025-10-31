@@ -16,10 +16,13 @@ let pyWorker = null;
 let workerReady = false;
 let workerInitPromise = null;
 let workerCanInterrupt = false; // SharedArrayBuffer による割り込み可否
+let __stopFallbackTimer = null; // stop()のフォールバック強制終了タイマー
 const IS_FILE_ORIGIN = (location.protocol === 'file:');
 // stdout に流す入力要求マーカー（フォールバック用）
 const INPUT_MARK = '<<<INPUT>>>';
 let awaitingInputUI = false; // 二重UI防止
+const INPUT_CANCEL = '__INPUT_CANCELLED__'; // 入力UIキャンセル時の番兵
+let __pendingInput = null; // {resolve,reject} を保持（停止時に確実に解消）
 // メインスレッド実行時用：JS側で入力UIを出し、その結果をPromiseで返す関数をPythonからawaitする
 // （Worker実行時は使われず、従来の postMessage / stdout マーカーで動作）
 window.__input_async = function(promptText){
@@ -706,6 +709,9 @@ function updateStatusBadges() {
 /* ============ 課題選択・表示（切替保存は非同期・UIは即時） ============ */
 
 async function selectTask(nextTaskId) {
+  // 課題切替時に実行環境を必ずクリア（実行中/待ち状態の取り残し対策）
+  if (running || pyWorker) { hardKillWorker('selectTask'); }
+
   // 前タスクを非同期で保存（提出済はスキップ）
   if (previousTaskId && previousTaskId !== nextTaskId) {
     if (!taskSubmitted[previousTaskId] && !getCachedSubmitted(previousTaskId)) {
@@ -713,10 +719,8 @@ async function selectTask(nextTaskId) {
       const prevOut  = outputBuffer;
       const prevHint = hintOpened;
       saveToCache(previousTaskId, { code: prevCode, output: prevOut, hintOpened: prevHint, submitted: false });
-      saveSpecificTask(previousTaskId,
-        { code: prevCode, output: prevOut, hintOpened: prevHint, submitted: false },
-        true
-      ).catch(e => console.warn('[Main] bg save error', e));
+      // 通信削減方針：タスク切替時はサーバ保存しない（ローカルのみ）
+      // サーバ反映は［上書き保存／提出／ヒント］時に限定
     }
   }
 
@@ -900,8 +904,7 @@ function applyInitialCodeIfBlank(task) {
   outputBuffer = ""; document.getElementById('outputArea').textContent = "";
   hintOpened = false; taskSubmitted[currentTaskId] = false; setSubmitButtonState(false); unlockEditor();
   saveToCache(currentTaskId, { code: initial, output: "", hintOpened: false, submitted: false });
-  saveSpecificTask(currentTaskId, { code: initial, output: "", hintOpened: false, submitted: false }, true)
-    .catch(e => console.warn('[Main] init save error', e));
+  // 初回の InitialCode 適用時もサーバ保存はしない
 }
 
 /* ============ エディタ / 実行 / 保存 ============ */
@@ -1019,6 +1022,21 @@ function resumeExecTimer(){
   _clearExecTimer();
   __execTimeoutId = setTimeout(_triggerTimeout, __remainingMs);
 }
+// ===== Worker を強制終了して状態を初期化（同時実行や連打での不安定化対策） =====
+function hardKillWorker(reason){
+  try{ if (__stopFallbackTimer){ clearTimeout(__stopFallbackTimer); __stopFallbackTimer=null; } }catch{}
+  // ぶら下がっている入力待ちを必ずキャンセル解決して次回の input を有効化
+  try{ cancelPendingInputUI('hardKill:'+ (reason||'')); }catch{}
+  if (pyWorker){
+    try{ pyWorker.terminate(); }catch(_){}
+    pyWorker = null;
+    workerReady = false;
+  }
+  awaitingInputUI = false;
+  try{ if (interruptBuffer) interruptBuffer[0] = 0; }catch{}
+  cleanupAfterRun();
+  console.warn('[Main] hardKillWorker:', reason || '(no reason)');
+}
 /* ===== Pyodide 実行を Web Worker に委譲 ===== */
 function ensurePyWorker(){
   if (pyWorker && workerReady) return workerInitPromise;
@@ -1058,6 +1076,8 @@ function ensurePyWorker(){
             break;
           }
           case 'stopped':
+            // Worker 側で停止が完了したら、未解決の入力があってもキャンセルしてクリーンに戻す
+            try{ cancelPendingInputUI('worker-stopped'); }catch{}
             if (__timeoutTriggered) {
               appendOutput(`時間超過（${Math.round(EXEC_TIMEOUT_MS/1000)}秒）で実行を停止しました。\n`);
             } else {
@@ -1099,8 +1119,7 @@ function cleanupAfterRun(){
       const codeNow = editor ? editor.getValue() : '';
       const outNow  = outputBuffer;
       saveToCache(currentTaskId, { code: codeNow, output: outNow, hintOpened, submitted: false });
-      saveSpecificTask(currentTaskId, { code: codeNow, output: outNow, hintOpened, submitted: false }, true)
-        .catch(e => console.warn('[Main] run save error', e));
+      // 実行後もサーバ保存はしない（ローカルのみ）
       applyResultsToList(); updateStatusBadges();
     }
     if (currentTaskId) saveLocalState(currentTaskId);
@@ -1129,10 +1148,13 @@ async function handleStdoutChunk(s){
       pauseExecTimer();
       const val = await showInlineInput(String(prompt || ''));
       resumeExecTimer();
-      if (pyWorker) {
-        pyWorker.postMessage({ type: 'input_response', value: val });
-      } else {
-        try { await pyodide.runPythonAsync(`__input_queue.put_nowait(${JSON.stringify(String(val))})`); } catch(_){}
+      // 停止等でキャンセル済みなら応答を送らずに抜ける
+      if (val !== INPUT_CANCEL) {
+        if (pyWorker) {
+          pyWorker.postMessage({ type: 'input_response', value: val });
+        } else {
+          try { await pyodide.runPythonAsync(`__input_queue.put_nowait(${JSON.stringify(String(val))})`); } catch(_){}
+        }
       }
       awaitingInputUI = false;
     }
@@ -1171,7 +1193,12 @@ async function showInlineInput(promptText){
 }
 
 async function runCode() {
+  // 既存のワーカーが残っていれば強制終了（Run 連打／前回停止失敗の保険）
+  if (pyWorker) { hardKillWorker('run-start-cleanup'); }
+
   clearOutput(); enableSaveSubmitButtons();
+  // Run開始時にも念のため未解決の入力をキャンセル（連打・前回停止直後の保険）
+  try{ cancelPendingInputUI('run-start'); }catch{}
   let code = editor ? editor.getValue() : '';
   const indentSize = editor && editor.getOption ? editor.getOption('indentUnit') || 4 : 4;
   code = code.replace(/\t/g, ' '.repeat(indentSize));
@@ -1276,10 +1303,15 @@ async function ensurePyodideMain(){
 
 function stopCode(){
   try{
+    // 停止ボタン押下時点で入力待ちがあればキャンセル解決（UIも閉じる）
+    try{ cancelPendingInputUI('stop'); }catch{}
     if (pyWorker) {
       if (workerCanInterrupt) {
         // 共有メモリ割り込みが使える場合は KeyboardInterrupt を送る
         pyWorker.postMessage({ type: 'stop' });
+        // 一定時間内に停止通知が来なければ強制終了（取り残し対策）
+        try{ if(__stopFallbackTimer) clearTimeout(__stopFallbackTimer); }catch{}
+        __stopFallbackTimer = setTimeout(()=>{ hardKillWorker('stop-fallback'); }, 1500);
       } else {
         // 共有メモリが使えない環境ではワーカーを強制終了して即停止
         pyWorker.terminate();
@@ -1433,8 +1465,48 @@ async function safeText(res){ try { return await res.text(); } catch { return ""
 function safeJson(text){ try { const cleaned=text.replace(/^[)\]\}'\s]+/,""); return JSON.parse(cleaned); } catch { return null; } }
 
 
+try {
+  window.addEventListener('beforeunload', () => {
+    try{ cancelPendingInputUI('beforeunload'); }catch{}
+    if (pyWorker) hardKillWorker('beforeunload');
+  });
+} catch(_) {}
 
+// ===== 入力UIの生成とキャンセル補助 =====
+function cancelPendingInputUI(reason){
+  // 既存の showInlineInput() の Promise をキャンセル解決し、UIも安全に閉じる
+  const p = __pendingInput;
+  __pendingInput = null;
+  awaitingInputUI = false;
+  // 既存UIのDOM片付け（実装側のID/クラス名に合わせて二重に試す）
+  try {
+    const n1 = document.getElementById('inline-input-container');
+    if (n1 && n1.parentNode) n1.parentNode.removeChild(n1);
+  } catch(_){}
+  try {
+    const n2 = document.querySelector('[data-role="inline-input"]');
+    if (n2 && n2.parentNode) n2.parentNode.removeChild(n2);
+  } catch(_){}
+  if (p && typeof p.resolve === 'function') {
+    try { p.resolve(INPUT_CANCEL); } catch(_){}
+  }
+  console.log('[Main] input cancelled:', reason||'');
+}
 
+// 既存の showInlineInput をフックし、pending解決手段を保持（本体のDOM生成/Enter確定は既存ロジックのまま）
+const __orig_showInlineInput = showInlineInput;
+showInlineInput = function(promptText){
+  return new Promise((resolve) => {
+    __pendingInput = { resolve };
+    Promise.resolve(__orig_showInlineInput(String(promptText||''))).then((val) => {
+      // 正常入力で確定した場合、pendingをクリア
+      if (__pendingInput && __pendingInput.resolve === resolve) {
+        __pendingInput = null;
+      }
+      resolve(val);
+    });
+  });
+};
 
 
 
