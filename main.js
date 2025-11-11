@@ -19,10 +19,23 @@ let workerCanInterrupt = false; // SharedArrayBuffer による割り込み可否
 let __stopFallbackTimer = null; // stop()のフォールバック強制終了タイマー
 const IS_FILE_ORIGIN = (location.protocol === 'file:');
 // stdout に流す入力要求マーカー（フォールバック用）
+// 実行識別子（前回実行からの遅延メッセージを捨てるためのトークン）
+let currentRunToken = 0;
+window.__activeRunToken = 0; // 入力UI側でも参照
 const INPUT_MARK = '<<<INPUT>>>';
+const PLOT_MARK  = '<<<PLOT>>>';   // 画像データURIをstdout経由で受け取るマーカー
+const SLEEP_MARK = '<<<SLEEP>>>';  // time.sleep の開始/終了をstdout経由で通知
+// 画像送信用（Worker経由では postMessage、フォールバックでは直接呼び出し）
 let awaitingInputUI = false; // 二重UI防止
 const INPUT_CANCEL = '__INPUT_CANCELLED__'; // 入力UIキャンセル時の番兵
 let __pendingInput = null; // {resolve,reject} を保持（停止時に確実に解消）
+// --- 追加: コードが matplotlib を使うかの軽量判定 ---
+function needsMatplotlib(code){
+  const s = String(code || '');
+  // 代表的な書き方を幅広く捕捉（誤検知を極力避けつつ軽量）
+  return /(^|\n)\s*(from\s+matplotlib\b|import\s+matplotlib(\.pyplot)?\b)/.test(s)
+         || /\bpyplot\s*\./.test(s);
+}
 // メインスレッド実行時用：JS側で入力UIを出し、その結果をPromiseで返す関数をPythonからawaitする
 // （Worker実行時は使われず、従来の postMessage / stdout マーカーで動作）
 window.__input_async = function(promptText){
@@ -57,12 +70,28 @@ function appendStdoutNormalized(text){
   if (!t.endsWith("\n")) t += "\n";
   appendOutput(t);
 }
+// 画像（data URL）を実行結果に追加
+function appendPlotDataUrl(dataUrl){
+  // 実装上の正式IDは #output。旧互換で #outputArea もフォールバックとして許容。
+  const a = document.getElementById("output") || document.getElementById("outputArea");
+  const img = document.createElement('img');
+  img.src = String(dataUrl);
+  img.alt = 'plot';
+  // 見え方を安定させる（<pre>内でも崩れない）
+  img.style.display = 'block';
+  img.style.maxWidth = '100%';
+  img.style.marginTop = '6px';
+  img.decoding = 'async';
+  a.appendChild(img);
+  outputBuffer += `[plot]\n`;
+  try { a.scrollTop = a.scrollHeight; } catch(_) {}
+}
 
 // file:// で外部 worker を読めない環境向け：インラインWorkerのソース生成（正規表現置換は使わない）
 function buildInlineWorkerSource(){
   return [
     "// inline py_worker (blob)",
-    "let pyodide=null; let interruptBuffer=null; let running=false;",
+    "let pyodide=null; let interruptBuffer=null; let running=false; let curToken=0;",
     "self.onmessage=async(ev)=>{",
     "  const msg=ev.data||{};",
     "  try{",
@@ -70,8 +99,8 @@ function buildInlineWorkerSource(){
     "      if(!pyodide){",
     "        importScripts('https://cdn.jsdelivr.net/pyodide/v0.22.1/full/pyodide.js');",
     "        pyodide=await loadPyodide();",
-    "        pyodide.setStdout({batched:(s)=>postMessage({type:'stdout',data:s})});",
-    "        pyodide.setStderr({batched:(s)=>postMessage({type:'stderr',data:s})});",
+    "        pyodide.setStdout({batched:(s)=>postMessage({type:'stdout',token:curToken,data:s})});",
+    "        pyodide.setStderr({batched:(s)=>postMessage({type:'stderr',token:curToken,data:s})});",
     "      }",
     "      try{",
     "        if(typeof SharedArrayBuffer!=='undefined' && pyodide.setInterruptBuffer && !interruptBuffer){",
@@ -91,37 +120,74 @@ function buildInlineWorkerSource(){
     "      return;",
     "    }",
     "    if(msg.type==='run'){",
+    "      curToken = msg.token || 0;",
+    "      self.curToken = curToken;", // ★ Python 側から js.curToken で参照させる
     "      if(!pyodide){ postMessage({type:'error',message:'Pyodide not ready'}); return; }",
     "      if(running){ postMessage({type:'error',message:'already running'}); return; }",
     "      running=true;",
     "      try{",
     "        const userCode=String(msg.code||'');",
+    "        if (msg.needsMatplotlib) { try{ await pyodide.loadPackage(['matplotlib']); }catch(_){ } }", // ★ 必要時のみ
     "        const body=userCode.split('\\n').map(l=>'    '+l).join('\\n');",
     "        const patched=body.replace(/(^|[^A-Za-z0-9_])input\\s*\\(/g,'$1await __await_input__(');",
-    "        const wrapped=(",
-    "          'import js, asyncio\\n'+",
-    "          '__input_queue = asyncio.Queue()\\n'+",
-    "          'async def __await_input__(prompt=\"\"):\\n'+",
-    "          '    p = str(prompt) if prompt is not None else \"\"\\n'+",
-    "          '    # 通常: JS メッセージ\\n'+",
-    "          '    try:\\n'+",
-    "          '        js.postMessage({ \"type\":\"input_request\", \"prompt\": p })\\n'+",
-    "          '    except Exception as _e:\\n'+",
-    "          '        pass\\n'+",
-    "          '    # フォールバック: stdout にマーカーを流してメインが検出（改行で flush）\\n'+",
-    "          '    print(\"<<<INPUT>>>\"+p)\\n'+",
-    "          '    v = await __input_queue.get()\\n'+",
-    "          '    return str(v)\\n'+",
-    "          'async def __user_main():\\n'+",
-    "          patched+'\\n'+",
-    "          'await __user_main()\\n'",
-    "        );",
-    "        await pyodide.runPythonAsync(wrapped);",
-    "        postMessage({type:'done'});",
+    "        const wrapped = ",
+    "          [",
+    "            'import js, asyncio',",
+    "            \"# ---- pyplot をPNGでメインへ送る仕組み ----\",",
+    "            'try:',",
+    "            '    import matplotlib; matplotlib.use(\"module://matplotlib_pyodide\", force=True)',",
+    "            '    from matplotlib import pyplot as plt',",
+    "            '    plt.ioff()',",
+    "            '    import io, base64',",
+    "            '    def __flush_plots__():',",
+    "            '        try:',",
+    "            '            fids = list(plt.get_fignums())',",
+    "            '            for fid in fids:',",
+    "            '                fig = plt.figure(fid)',",
+    "            '                try:',",
+    "            '                    fig.canvas.draw()',",
+    "            '                    buf = io.BytesIO()',",
+    "            '                    fig.savefig(buf, format=\"png\", bbox_inches=\"tight\")',",
+    "            '                    buf.seek(0)',",
+    "            '                    b64 = base64.b64encode(buf.getvalue()).decode(\"ascii\")',",
+    "            '                    js.postMessage({\"type\":\"plot\",\"token\":js.curToken,\"data\":\"data:image/png;base64,\"+b64})',",
+    "            '                finally:',",
+    "            '                    plt.close(fig)',",
+    "            '        except Exception as _e:',",
+    "            '            pass',",
+    "            '    def __plt_show_patch__(*args, **kwargs):',",
+    "            '        __flush_plots__()',",
+    "            '    try:',",
+    "            '        plt.show = __plt_show_patch__',",
+    "            '    except:',",
+    "            '        pass',",
+    "            'except Exception as _e:',",
+    "            '    pass',",
+    "            '__input_queue = asyncio.Queue()',",
+    "            'async def __await_input__(prompt=\"\"):',",
+    "            '    p = str(prompt) if prompt is not None else \"\"',",
+    "            '    try:',",
+    "            '        js.postMessage({\"type\":\"input_request\",\"token\":js.curToken,\"prompt\":p})',",
+    "            '    except Exception as _e:',",
+    "            '        pass',",
+    "            '    print(\"<<<INPUT>>>\"+p)',",
+    "            '    v = await __input_queue.get()',",
+    "            '    return str(v)',",
+    "            'async def __user_main():'",
+    "          ].join('\\n')",
+    "          + '\\n' + patched + '\\n' + [",
+    "            'await __user_main()',",
+    "            'try:',",
+    "            '    __flush_plots__()',",
+    "            '    plt.close(\"all\")',",
+    "            'except:',",
+    "            '    pass'",
+    "          ].join('\\n');",    "        await pyodide.runPythonAsync(wrapped);",
+    "        postMessage({type:'done',token:curToken});",
     "      }catch(e){",
     "        const m=String(e||'');",
-    "        if(m.includes('KeyboardInterrupt')) postMessage({type:'stopped'});",
-    "        else postMessage({type:'error',message:m});",
+    "        if(m.includes('KeyboardInterrupt')) postMessage({type:'stopped',token:curToken});",
+    "        else postMessage({type:'error',token:curToken,message:m});",
     "      }finally{",
     "        try{ if(interruptBuffer) interruptBuffer[0]=0; }catch(e){}",
     "        running=false;",
@@ -1024,6 +1090,9 @@ function resumeExecTimer(){
 }
 // ===== Worker を強制終了して状態を初期化（同時実行や連打での不安定化対策） =====
 function hardKillWorker(reason){
+  // 以降の遅延メッセージを無効化
+  currentRunToken = (currentRunToken + 1) | 0;
+  window.__activeRunToken = currentRunToken;
   try{ if (__stopFallbackTimer){ clearTimeout(__stopFallbackTimer); __stopFallbackTimer=null; } }catch{}
   // ぶら下がっている入力待ちを必ずキャンセル解決して次回の input を有効化
   try{ cancelPendingInputUI('hardKill:'+ (reason||'')); }catch{}
@@ -1033,7 +1102,8 @@ function hardKillWorker(reason){
     workerReady = false;
   }
   awaitingInputUI = false;
-  try{ if (interruptBuffer) interruptBuffer[0] = 0; }catch{}
+  // メインスレッド実行中なら割り込み
+  try{ if (interruptBuffer) interruptBuffer[0] = 2; }catch{}
   cleanupAfterRun();
   console.warn('[Main] hardKillWorker:', reason || '(no reason)');
 }
@@ -1047,7 +1117,8 @@ function ensurePyWorker(){
       // Worker 側の実行エラーを可視化
       pyWorker.onerror = (e) => {
         console.error('[Worker error]', e.message, e.filename, e.lineno, e.colno);
-      };      pyWorker.onmessage = async (ev) => {
+      };
+      pyWorker.onmessage = async (ev) => {
         const msg = ev.data || {};
         switch(msg.type){
           case 'ready':
@@ -1060,12 +1131,13 @@ function ensurePyWorker(){
             console.log('[Worker]', msg.message);
             break;
           case 'stdout': {
-            await handleStdoutChunk(String(msg.data || ''));
+            if (msg.token === currentRunToken) { await handleStdoutChunk(String(msg.data || '')); }
             break;
           }          case 'stderr':
-            appendStdoutNormalized(String(msg.data || '')); break;
+            if (msg.token === currentRunToken) { appendStdoutNormalized(String(msg.data || '')); }
+            break;
           case 'input_request': { // 入力待ちはタイマー停止→入力→再開
-            if (!awaitingInputUI) {
+            if (msg.token === currentRunToken && !awaitingInputUI) {
               awaitingInputUI = true;
               pauseExecTimer();
               const val = await showInlineInput(String(msg.prompt || ''));
@@ -1075,8 +1147,24 @@ function ensurePyWorker(){
             }
             break;
           }
+          case 'plot': {
+            // 受信可視化＆古い実行からの迷い込みを明示
+            const ok = (msg.token === currentRunToken);
+            console.log('[Worker] plot received', { token: msg.token, current: currentRunToken, accept: ok });
+            if (!ok) {
+              console.log('[Worker] plot dropped (stale)');
+              break;
+            }
+            appendPlotDataUrl(String(msg.data || ''));
+            break;
+          }
+          case 'plot-debug': {
+            // 描画デバッグ（flushの開始/終了/例外）
+            console.log('[Worker] plot-debug', msg);
+            break;
+          }
           case 'stopped':
-            // Worker 側で停止が完了したら、未解決の入力があってもキャンセルしてクリーンに戻す
+            if (msg.token !== currentRunToken) break;
             try{ cancelPendingInputUI('worker-stopped'); }catch{}
             if (__timeoutTriggered) {
               appendOutput(`時間超過（${Math.round(EXEC_TIMEOUT_MS/1000)}秒）で実行を停止しました。\n`);
@@ -1086,10 +1174,11 @@ function ensurePyWorker(){
             cleanupAfterRun();
             break;
           case 'done':
+            if (msg.token !== currentRunToken) break;
             cleanupAfterRun();
             break;
           case 'error':
-            appendOutput(String(msg.message || '実行エラー') + '\n');
+            if (msg.token === currentRunToken) { appendOutput(String(msg.message || '実行エラー') + '\n'); }
             cleanupAfterRun();
             break;
         }
@@ -1102,7 +1191,7 @@ function ensurePyWorker(){
           pyWorker = null; // 明示的に無効化
           reject(new Error('worker-timeout'));
         }
-      }, 2500);
+      }, 15000); // ★ 5秒→15秒。学内ネット回線での初回読込遅延に耐える
       pyWorker.postMessage({ type: 'init' });
     }catch(e){ reject(e); }
   });
@@ -1126,41 +1215,51 @@ function cleanupAfterRun(){
   } catch(e){}
 }
 
-// stdout を監視して、INPUT_MARK を“行単位”で検出して UI を出す
+// stdout を監視して、INPUT と PLOT の両マーカーを“行単位”で処理
 async function handleStdoutChunk(s){
-  // マーカーが無ければ正規化して出力（改行保証）
-  if (!s.includes(INPUT_MARK)) { appendStdoutNormalized(s); return; }
-  let rest = s;
-  // 同一チャンクに通常出力とマーカーが混在しても取りこぼさない
-  while (true) {
-    const idx = rest.indexOf(INPUT_MARK);
-    if (idx < 0) { appendStdoutNormalized(rest); break; }
-    // マーカー前はそのまま出力
+  let rest = String(s);
+  while (rest.length) {
+    const iInput = rest.indexOf(INPUT_MARK);
+    const iPlot  = rest.indexOf(PLOT_MARK);
+    const iSleep = rest.indexOf(SLEEP_MARK);
+    // どのマーカーも無ければ残りを出力して終了
+    if (iInput < 0 && iPlot < 0 && iSleep < 0) { appendStdoutNormalized(rest); break; }
+    // 次に現れるマーカーを決定
+    let kind = null, idx = -1, mark = '';
+    const first = [ ['input', iInput, INPUT_MARK], ['plot', iPlot, PLOT_MARK], ['sleep', iSleep, SLEEP_MARK] ]
+      .filter(([_,pos]) => pos >= 0)
+      .sort((a,b)=>a[1]-b[1])[0];
+    kind = first[0]; idx = first[1]; mark = first[2];
+    // マーカー前は通常出力
     const before = rest.slice(0, idx);
     if (before) appendStdoutNormalized(before);
-    // マーカー行（<<<INPUT>>><prompt>\n）の prompt を抜き出す
-    const afterMark = rest.slice(idx + INPUT_MARK.length);
-    const nl = afterMark.indexOf("\n");
-    const prompt = nl >= 0 ? afterMark.slice(0, nl) : afterMark;  // 改行が無い場合も一応対応
-    // 入力 UI（多重起動防止）
-    if (!awaitingInputUI) {
-      awaitingInputUI = true;
-      pauseExecTimer();
-      const val = await showInlineInput(String(prompt || ''));
-      resumeExecTimer();
-      // 停止等でキャンセル済みなら応答を送らずに抜ける
-      if (val !== INPUT_CANCEL) {
-        if (pyWorker) {
-          pyWorker.postMessage({ type: 'input_response', value: val });
-        } else {
-          try { await pyodide.runPythonAsync(`__input_queue.put_nowait(${JSON.stringify(String(val))})`); } catch(_){}
+    // マーカー行の本文（次の改行手前まで）
+    const after = rest.slice(idx + mark.length);
+    const nl = after.indexOf("\n");
+    const payload = nl >= 0 ? after.slice(0, nl) : after;
+    if (kind === 'input') {
+      if (!awaitingInputUI) {
+        awaitingInputUI = true;
+        pauseExecTimer();
+        const val = await showInlineInput(String(payload || ''));
+        resumeExecTimer();
+        if (val !== INPUT_CANCEL) {
+          if (pyWorker) pyWorker.postMessage({ type: 'input_response', value: val });
+          else { try { await pyodide.runPythonAsync(`__input_queue.put_nowait(${JSON.stringify(String(val))})`); } catch(_){} }
         }
+        awaitingInputUI = false;
       }
-      awaitingInputUI = false;
+    } else if (kind === 'plot') {
+      // 画像データURIをUIへ反映（出力テキストには残さない）
+      appendPlotDataUrl(String(payload || ''));
+    } else if (kind === 'sleep') {
+      // time.sleep の開始/終了（stdout 経由通知）
+      const p = String(payload || '').trim().toLowerCase();
+      if (p.startsWith('start')) pauseExecTimer();
+      else resumeExecTimer();
     }
-    // 残り（マーカー行の“次の文字”から）を続けて処理
-    rest = nl >= 0 ? afterMark.slice(nl + 1) : "";
-    if (!rest) break;
+    // 残りを続けて処理
+    rest = nl >= 0 ? after.slice(nl + 1) : "";
   }
 }
 
@@ -1199,6 +1298,10 @@ async function runCode() {
   clearOutput(); enableSaveSubmitButtons();
   // Run開始時にも念のため未解決の入力をキャンセル（連打・前回停止直後の保険）
   try{ cancelPendingInputUI('run-start'); }catch{}
+  // 実行トークンを更新
+  currentRunToken = (currentRunToken + 1) | 0;
+  window.__activeRunToken = currentRunToken;
+  const myToken = currentRunToken;
   let code = editor ? editor.getValue() : '';
   const indentSize = editor && editor.getOption ? editor.getOption('indentUnit') || 4 : 4;
   code = code.replace(/\t/g, ' '.repeat(indentSize));
@@ -1207,16 +1310,33 @@ async function runCode() {
   if (interruptBuffer) interruptBuffer[0] = 0; enableSaveSubmitButtons();
   startExecTimer();  // 入力待ちは pause/resume される
   // 先に input() を確実に await へ置換（Worker 側の置換失敗に備える）
-  const prePatchedCode = code.replace(/(^|[^A-Za-z0-9_])input\s*\(/g, '$1await __await_input__(');
-  const isPrePatched   = prePatchedCode !== code;
+  // 1) input() → await __await_input__(
+  let patched = code.replace(/(^|[^A-Za-z0-9_])input\s*\(/g, '$1await __await_input__(');
+  // 2) time.sleep() → await __sleep__(
+  if (/\btime\s*\.\s*sleep\s*\(/.test(patched)) {
+    patched = patched.replace(/\btime\s*\.\s*sleep\s*\(/g, 'await __sleep__(');
+  }
+  // 3) from time import sleep がある場合の素の sleep() も置換
+  if (/^\s*from\s+time\s+import\s+sleep\b/m.test(code) && /(^|[^A-Za-z0-9_])sleep\s*\(/.test(patched)) {
+    patched = patched.replace(/(^|[^A-Za-z0-9_])sleep\s*\(/g, '$1await __sleep__(');
+  }
+  const isPrePatched   = (patched !== code);
+  const prePatchedCode = patched;
+  const useMPL = needsMatplotlib(prePatchedCode);
   // Worker 初期化に失敗したら main-thread 実行へフォールバック
   try {
     await ensurePyWorker();
     // 実行依頼（前置換済みかどうかを通知）
-    pyWorker.postMessage({ type: 'run', code: prePatchedCode, prePatched: isPrePatched });
+    pyWorker.postMessage({
+      type: 'run',
+      code: prePatchedCode,
+      prePatched: isPrePatched,
+      token: myToken,
+      needsMatplotlib: useMPL
+    });
   } catch (e) {
     console.warn('[Main] worker unavailable, fallback to main-thread run:', e && e.message);
-    await runCodeInMainThread(prePatchedCode); // フォールバック時も前置換済みを使う
+    await runCodeInMainThread(prePatchedCode, myToken, useMPL); // フォールバック時も前置換済みを使う
   }
 }
 
@@ -1225,20 +1345,76 @@ async function runCode() {
  * - stdout/stderr をメインで受けて handleStdoutChunk を通す（INPUT_MARK 検出で input UI）
  * - 停止ボタン／10秒タイムアウトは main-thread の interruptBuffer で継続利用
  */
-async function runCodeInMainThread(userCode){
+async function runCodeInMainThread(userCode, myToken, useMPL){
   try {
     // Pyodide が未ロードの環境でも自己ロードしてから実行
     await ensurePyodideMain();
+    // ★ 必要なときだけ matplotlib を読み込む
+    if (useMPL) {
+      try { await pyodide.loadPackage(['matplotlib']); } catch(_) {}
+    }
     // 出力をフック（print や フォールバック input マーカーを拾う）
     if (pyodide && pyodide.setStdout) {
-      pyodide.setStdout({ batched: (s) => { handleStdoutChunk(String(s)); } });
+      pyodide.setStdout({ batched: (s) => { if (myToken === currentRunToken) handleStdoutChunk(String(s)); } });
     }
     if (pyodide && pyodide.setStderr) {
-      pyodide.setStderr({ batched: (s) => { appendStdoutNormalized(String(s)); } });
+      pyodide.setStderr({ batched: (s) => { if (myToken === currentRunToken) appendStdoutNormalized(String(s)); } });
     }
+    // 入力UIもトークンでガード
+    const prevInputAsync = window.__input_async;
+    window.__input_async = function(promptText){
+      if (myToken !== currentRunToken) return Promise.resolve("");
+      return prevInputAsync(promptText);
+    };
     const body = String(userCode||'').split('\n').map(l => '    ' + l).join('\n');
     const wrapped = [
       'import js, asyncio',
+      '# pyplot をPNGで送るパッチ',
+      'try:',
+      '    import matplotlib',
+      '    matplotlib.use("Agg", force=True)',
+      '    from matplotlib import pyplot as plt',
+      '    from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas',
+      '    plt.ioff()',
+      '    import io, base64',
+      '    def __flush_plots__():',
+      '        try:',
+      '            fids = list(plt.get_fignums())',
+      '            for fid in fids:',
+      '                fig = plt.figure(fid)',
+      '                if not getattr(fig, "canvas", None):',
+      '                    FigureCanvas(fig)',
+      '                try:',
+      '                    fig.canvas.draw()',
+      '                    buf = io.BytesIO()',
+      '                    fig.savefig(buf, format="png", bbox_inches="tight")',
+      '                    buf.seek(0)',
+      '                    b64 = base64.b64encode(buf.getvalue()).decode("ascii")',
+      '                    print("<<<PLOT>>>" + "data:image/png;base64," + b64)',
+      '                finally:',
+      '                    plt.close(fig)',
+      '        except Exception as _e:',
+      '            pass',
+      '    def __plt_show_patch__(*args, **kwargs):',
+      '        __flush_plots__()',
+      '    try:',
+      '        plt.show = __plt_show_patch__',
+      '    except:',
+      '        pass',
+      'except Exception as _e:',
+      '    pass',
+      '',
+      '# time.sleep を非ブロッキング化（stdout で SLEEP 通知 → JS 側でタイマー制御）',
+      'async def __sleep__(sec):',
+      '    try:',
+      '        s = float(sec)',
+      '    except Exception:',
+      '        s = 0.0',
+      '    try:',
+      '        print("<<<SLEEP>>>start")',
+      '        await asyncio.sleep(max(0.0, s))',
+      '    finally:',
+      '        print("<<<SLEEP>>>end")',
       '__input_queue = asyncio.Queue()',
       'async def __await_input__(prompt=""):',
       '    p = str(prompt) if prompt is not None else ""',
@@ -1247,10 +1423,17 @@ async function runCodeInMainThread(userCode){
       '    return str(v)',
       'async def __user_main():',
       body,  // 既に前置換済みの文字列をそのまま使う
-      'await __user_main()'
+      // 先にユーザーコードを実行
+      'await __user_main()',
+      'try:',
+      '    __flush_plots__()',
+      '    plt.close("all")',
+      'except:',
+      '    pass',
     ].join('\n');
     await pyodide.runPythonAsync(wrapped);
-    cleanupAfterRun();
+    // 復元
+    window.__input_async = prevInputAsync;    cleanupAfterRun();
   } catch (err) {
     appendOutput(String(err||'実行エラー') + '\n');
     cleanupAfterRun();

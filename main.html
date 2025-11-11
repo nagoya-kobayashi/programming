@@ -54,6 +54,10 @@
     #problemText, #hint { line-height: 1.6; }
     #outputArea { white-space: pre-wrap; }
 
+    /* pyplot 画像がはみ出さないように */
+    #outputArea img { max-width: 100%; height: auto; display: block; margin: 6px 0; }
+    #outputArea canvas { max-width: 100%; }
+
     #editorWrapper.locked { background:#f5f5f5; filter:grayscale(.2); border-radius:6px; }
     #editorWrapper.locked .CodeMirror { background:#f5f5f5; }
     button[disabled] { opacity:.55; cursor:default !important; }
