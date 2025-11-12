@@ -5,7 +5,8 @@
 window.APP_CONFIG = {
   // Web アプリのベース URL。Google Apps Script を Web App として公開した URL をここに設定します。
   // 例: "https://script.google.com/macros/s/AKfycb.../exec"
-  serverBaseUrl: "https://script.google.com/macros/s/AKfycbwFuqIjuIHEbqqZwWAqJv3Xrn1sx-1uh1E-mUfhkEnB_PFsH67_rSPqu6-EXusCgJFP/exec",
+  //serverBaseUrl: "https://script.google.com/macros/s/AKfycbwFuqIjuIHEbqqZwWAqJv3Xrn1sx-1uh1E-mUfhkEnB_PFsH67_rSPqu6-EXusCgJFP/exec", //本番環境
+  serverBaseUrl: "https://script.google.com/macros/s/AKfycbxYGWqbcRGgXyNTsNU3YUkR1iK47S4cUzDyV_lD5SVpl37oJR2rWHucAl-Ocgr80e63pQ/exec", //検証環境
   // 保存および提出エンドポイント。Apps Script の場合、ベース URL に追加パスは不要なので空文字列にします。
   saveScript: "",
   submitScript: "",
