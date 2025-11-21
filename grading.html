@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <title>採点ページ | プログラミング学習</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="grading.css" />
+  <script src="config.js"></script>
+  <script defer src="grading.js"></script>
+</head>
+<body>
+  <header class="grading-header">
+    <div class="target-inputs">
+      <label class="mode-option">
+        <input type="radio" name="targetMode" value="class" checked />
+        クラス指定
+      </label>
+      <input type="text" id="classInput" placeholder="例: 1-A" />
+      <label class="mode-option">
+        <input type="radio" name="targetMode" value="user" />
+        ユーザID指定
+      </label>
+      <input type="text" id="userInput" placeholder="例: user001" />
+      <button id="loadButton" type="button">読み込み</button>
+    </div>
+    <div class="header-actions">
+      <div id="classInfo">対象クラス: 未選択</div>
+      <div class="header-buttons">
+        <button id="bulkFullButton" type="button" disabled>一括100</button>
+      </div>
+    </div>
+  </header>
+
+  <div id="globalMessage" role="status"></div>
+
+  <div id="gradingContainer">
+    <aside id="taskSidebar">
+      <div class="sidebar-header">
+        <h2>課題一覧</h2>
+      </div>
+      <div id="taskTree" class="task-tree empty">クラスを読み込んでください。</div>
+    </aside>
+    <section id="gradingWorkspace">
+      <div id="taskSummary">課題を選択してください。</div>
+      <div id="gradingTableWrapper">
+        <div id="gradingTable" class="empty-state">まだ課題が選択されていません。</div>
+      </div>
+      <div class="save-bar">
+        <span id="saveStatus"></span>
+        <button id="saveButton" type="button" disabled>保存</button>
+      </div>
+    </section>
+  </div>
+</body>
+</html>
