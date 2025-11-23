@@ -172,6 +172,17 @@
     { key: 'submitted', label: '提出済' },
     { key: 'pending', label: '未提出' }
   ];
+  const STATE_COLORS = {
+    cleared: '#52c41a',
+    graded: '#ff8fb7',
+    submitted: '#9254de',
+    pending: '#d9d9d9'
+  };
+  const BASE_KEY = (suffix) => {
+    const base = (typeof (window.APP_CONFIG || {}).serverBaseUrl === 'string' && (window.APP_CONFIG || {}).serverBaseUrl) || 'default';
+    return `learn.${suffix}.${base}`;
+  };
+  const SELECTED_KEY = () => BASE_KEY('selectedTask');
   function canonicalHeader(h) { return String(h || '').replace(/^\uFEFF/, '').trim().toLowerCase(); }
   function toBool(v) { const s = String(v || '').trim().toLowerCase(); return s === 'true' || s === '1' || s === 'yes' || s === 'y'; }
   function normalizeSnapshotTasks(raw) {
@@ -224,12 +235,12 @@
       return path;
     };
     tasks.forEach(t => { if (!t.isFolder) resolve(t.id); });
-    return cache;
+    return { cache, map };
   }
   function classifyTasks(tasks, states) {
     const grouped = { cleared: [], graded: [], submitted: [], pending: [] };
     const stateMap = states || {};
-    const pathMap = buildTaskPathMap(tasks);
+    const { cache: pathMap, map } = buildTaskPathMap(tasks);
     tasks.forEach(t => {
       if (t.isFolder) return;
       const state = stateMap[t.id] || {};
@@ -243,12 +254,36 @@
       else if (hasNumeric && scoreNum === 100) bucket = 'cleared';
       else if (hasNumeric && scoreNum < 100) bucket = 'graded';
       const path = pathMap[t.id] || t.title || t.id;
-      grouped[bucket].push({ id: t.id, path });
+      grouped[bucket].push({ id: t.id, path, parentId: t.parentId });
     });
     Object.keys(grouped).forEach(k => {
       grouped[k].sort((a, b) => (a.path || '').localeCompare(b.path || '', 'ja'));
     });
     return grouped;
+  }
+  function startFromTask(taskId) {
+    try { localStorage.setItem(SELECTED_KEY(), String(taskId || '')); } catch (e) { console.warn('[index] failed to store selected task', e); }
+    try {
+      const taskMap = new Map();
+      lastSnapshotTasks.forEach(t => taskMap.set(String(t.id), t));
+      const chain = [];
+      let cur = taskMap.get(String(taskId));
+      const safeGuard = new Set();
+      while (cur && cur.parentId) {
+        const pid = String(cur.parentId);
+        if (safeGuard.has(pid)) break;
+        safeGuard.add(pid);
+        chain.push(pid);
+        cur = taskMap.get(pid);
+      }
+      let collapsed = {};
+      try { collapsed = JSON.parse(localStorage.getItem(BASE_KEY('collapsed')) || '{}') || {}; } catch (_) { collapsed = {}; }
+      chain.forEach(pid => { collapsed[pid] = false; });
+      localStorage.setItem(BASE_KEY('collapsed'), JSON.stringify(collapsed));
+    } catch (err) {
+      console.warn('[index] failed to expand parents', err);
+    }
+    location.href = 'main.html';
   }
   function renderSnapshotSummary(snapshot) {
     const container = document.getElementById('taskStateSummary');
@@ -262,6 +297,7 @@
       container.hidden = true;
       return;
     }
+    lastSnapshotTasks = tasks;
     const grouped = classifyTasks(tasks, snapshot.states || {});
     container.innerHTML = '';
 
@@ -277,6 +313,13 @@
       const header = document.createElement('div');
       header.className = 'state-header';
 
+      const icon = document.createElement('span');
+      const items = grouped[group.key] || [];
+      const isCleared = group.key === 'cleared';
+      icon.className = `state-icon task-icon ${isCleared ? 'sparkle-star' : 'dot-icon'}`;
+      icon.textContent = isCleared ? '★' : '●';
+      if (!isCleared) icon.style.color = STATE_COLORS[group.key] || STATE_COLORS.pending;
+
       const toggle = document.createElement('button');
       toggle.type = 'button';
       toggle.className = 'state-toggle';
@@ -289,7 +332,6 @@
 
       const count = document.createElement('span');
       count.className = 'state-count';
-      const items = grouped[group.key] || [];
       count.textContent = `(${items.length}件)`;
 
       const list = document.createElement('ul');
@@ -304,7 +346,21 @@
       } else {
         items.forEach(item => {
           const li = document.createElement('li');
-          li.textContent = item.path || item.id;
+          li.className = 'state-item';
+          const titleSpan = document.createElement('span');
+          titleSpan.className = 'state-title-text';
+          titleSpan.textContent = item.path || item.id;
+          const startBtn = document.createElement('button');
+          startBtn.type = 'button';
+          startBtn.className = 'state-start-btn';
+          startBtn.textContent = 'この課題からはじめる';
+          startBtn.addEventListener('click', (ev) => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            startFromTask(item.id);
+          });
+          li.appendChild(titleSpan);
+          li.appendChild(startBtn);
           list.appendChild(li);
         });
       }
@@ -323,6 +379,7 @@
         setExpanded(list.hidden);
       });
 
+      header.appendChild(icon);
       header.appendChild(toggle);
       header.appendChild(title);
       header.appendChild(count);
