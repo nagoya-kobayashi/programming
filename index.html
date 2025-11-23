@@ -15,6 +15,22 @@
     button { padding: 10px 16px; border-radius: 8px; border: 1px solid #ccc; background: #1677ff; color: #fff; cursor: pointer; }
     button.secondary { background: #fff; color: #1677ff; border-color: #1677ff; }
     .msg { margin-top: 12px; color: #888; }
+    .task-state-summary { margin-top: 16px; padding: 12px; border: 1px solid #e5e5e5; border-radius: 10px; background: #fafafa; }
+    .task-state-summary .state-group { margin-top: 8px; }
+    .task-state-summary .state-header { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+    .task-state-summary .state-toggle { width: 26px; height: 26px; padding: 0; border-radius: 6px; border: 1px solid #ccc; background: #fff; color: #555; font-size: 14px; line-height: 1; }
+    .task-state-summary .state-toggle:focus { outline: 2px solid #91caff; outline-offset: 1px; }
+    .task-state-summary .state-header .state-icon { margin-right: 4px; }
+    .task-state-summary .state-list .state-item { display: flex; align-items: center; gap: 8px; justify-content: space-between; }
+    .task-state-summary .state-list .state-item .state-title-text { flex: 1 1 auto; }
+    .task-state-summary .state-list .state-start-btn { padding: 4px 8px; font-size: 0.9em; border-radius: 6px; border: 1px solid #1677ff; background: #f0f7ff; color: #1677ff; cursor: pointer; }
+    .task-state-summary .state-list .state-start-btn:hover { background: #e6f0ff; }
+    .task-state-summary .state-title { font-weight: 600; }
+    .task-state-summary .state-count { color: #666; font-size: 0.9em; }
+    .task-state-summary .state-list { margin: 6px 0 0 34px; padding: 0; }
+    .task-state-summary .state-list li { list-style: none; padding: 2px 0; color: #333; font-size: 0.95em; word-break: break-all; }
+    .task-state-summary .state-empty { color: #777; font-size: 0.9em; margin-left: 0; }
+    .task-state-summary .state-caption { font-weight: 700; color: #444; margin-bottom: 4px; }
   </style>
   <style>
     /* 事前プリロード中の簡易インジケータ */
@@ -28,6 +44,7 @@
     <div class="actions">
       <button id="primaryBtn">読み込み中...</button>
     </div>
+    <div id="taskStateSummary" class="task-state-summary" hidden></div>
     <div id="note" class="msg"></div>
   </div>
 
@@ -149,6 +166,190 @@
   window.__SNAP_KEY__ = `learn.snapshot.${serverBaseUrl}`;
   // 多重起動ガード
   let __preloadRunning = false;
+  const STATE_GROUPS = [
+    { key: 'cleared', label: 'クリア済' },
+    { key: 'graded', label: '採点済' },
+    { key: 'submitted', label: '提出済' },
+    { key: 'pending', label: '未提出' }
+  ];
+  function canonicalHeader(h) { return String(h || '').replace(/^\uFEFF/, '').trim().toLowerCase(); }
+  function toBool(v) { const s = String(v || '').trim().toLowerCase(); return s === 'true' || s === '1' || s === 'yes' || s === 'y'; }
+  function normalizeSnapshotTasks(raw) {
+    if (!Array.isArray(raw) || raw.length === 0) return [];
+    if (Array.isArray(raw[0])) {
+      const headerRow = raw[0].map(h => canonicalHeader(h));
+      const rows = raw.slice(1);
+      const idx = {
+        taskid: headerRow.indexOf('taskid'),
+        title: headerRow.indexOf('title'),
+        parentid: headerRow.indexOf('parentid'),
+        isfolder: headerRow.indexOf('isfolder')
+      };
+      const pick = (row, i) => (i >= 0 && i != null) ? row[i] : '';
+      return rows.map(r => ({
+        id: pick(r, idx.taskid) || '',
+        title: pick(r, idx.title) || pick(r, idx.taskid) || '',
+        parentId: pick(r, idx.parentid) || '',
+        isFolder: toBool(pick(r, idx.isfolder))
+      })).filter(t => t.id);
+    }
+    if (typeof raw[0] === 'object') {
+      return raw.map(obj => ({
+        id: obj.TaskId || obj.taskId || obj.taskid || '',
+        title: obj.Title || obj.title || obj.TaskId || obj.taskId || obj.taskid || '',
+        parentId: obj.ParentId || obj.parentId || obj.parentid || '',
+        isFolder: toBool(obj.IsFolder || obj.isFolder || obj.isfolder)
+      })).filter(t => t.id);
+    }
+    return [];
+  }
+  function buildTaskPathMap(tasks) {
+    const map = new Map();
+    tasks.forEach(t => map.set(String(t.id), t));
+    const cache = {};
+    const visiting = new Set();
+    const resolve = (id) => {
+      const key = String(id);
+      if (cache[key]) return cache[key];
+      if (visiting.has(key)) return map.get(key)?.title || key;
+      visiting.add(key);
+      const t = map.get(key);
+      if (!t) { visiting.delete(key); return key; }
+      const self = t.title || key;
+      const parentId = t.parentId && map.has(String(t.parentId)) ? String(t.parentId) : '';
+      const parentPath = parentId ? resolve(parentId) : '';
+      const path = parentPath ? `${parentPath} / ${self}` : self;
+      cache[key] = path;
+      visiting.delete(key);
+      return path;
+    };
+    tasks.forEach(t => { if (!t.isFolder) resolve(t.id); });
+    return cache;
+  }
+  function classifyTasks(tasks, states) {
+    const grouped = { cleared: [], graded: [], submitted: [], pending: [] };
+    const stateMap = states || {};
+    const pathMap = buildTaskPathMap(tasks);
+    tasks.forEach(t => {
+      if (t.isFolder) return;
+      const state = stateMap[t.id] || {};
+      const submitted = toBool(state.submitted);
+      const scoreRaw = state.score;
+      const scorePresent = scoreRaw !== undefined && scoreRaw !== null && String(scoreRaw).trim() !== '';
+      const scoreNum = Number(scoreRaw);
+      const hasNumeric = scorePresent && !Number.isNaN(scoreNum);
+      let bucket = 'pending';
+      if (submitted) bucket = 'submitted';
+      else if (hasNumeric && scoreNum === 100) bucket = 'cleared';
+      else if (hasNumeric && scoreNum < 100) bucket = 'graded';
+      const path = pathMap[t.id] || t.title || t.id;
+      grouped[bucket].push({ id: t.id, path });
+    });
+    Object.keys(grouped).forEach(k => {
+      grouped[k].sort((a, b) => (a.path || '').localeCompare(b.path || '', 'ja'));
+    });
+    return grouped;
+  }
+  function renderSnapshotSummary(snapshot) {
+    const container = document.getElementById('taskStateSummary');
+    if (!container) return;
+    if (!snapshot || !Array.isArray(snapshot.tasks) || snapshot.tasks.length === 0) {
+      container.hidden = true;
+      return;
+    }
+    const tasks = normalizeSnapshotTasks(snapshot.tasks);
+    if (tasks.length === 0) {
+      container.hidden = true;
+      return;
+    }
+    const grouped = classifyTasks(tasks, snapshot.states || {});
+    container.innerHTML = '';
+
+    const caption = document.createElement('div');
+    caption.className = 'state-caption';
+    caption.textContent = '課題の状態';
+    container.appendChild(caption);
+
+    STATE_GROUPS.forEach(group => {
+      const wrap = document.createElement('div');
+      wrap.className = 'state-group';
+
+      const header = document.createElement('div');
+      header.className = 'state-header';
+
+      const toggle = document.createElement('button');
+      toggle.type = 'button';
+      toggle.className = 'state-toggle';
+      toggle.textContent = '▶';
+      toggle.setAttribute('aria-expanded', 'false');
+
+      const title = document.createElement('span');
+      title.className = 'state-title';
+      title.textContent = group.label;
+
+      const count = document.createElement('span');
+      count.className = 'state-count';
+      const items = grouped[group.key] || [];
+      count.textContent = `(${items.length}件)`;
+
+      const list = document.createElement('ul');
+      list.className = 'state-list';
+      list.hidden = true;
+
+      if (items.length === 0) {
+        const empty = document.createElement('li');
+        empty.className = 'state-empty';
+        empty.textContent = '該当なし';
+        list.appendChild(empty);
+      } else {
+        items.forEach(item => {
+          const li = document.createElement('li');
+          li.textContent = item.path || item.id;
+          list.appendChild(li);
+        });
+      }
+
+      const setExpanded = (open) => {
+        list.hidden = !open;
+        toggle.textContent = open ? '▼' : '▶';
+        toggle.setAttribute('aria-expanded', String(open));
+      };
+      toggle.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        setExpanded(list.hidden);
+      });
+      header.addEventListener('click', (ev) => {
+        if (ev.target === toggle) return;
+        setExpanded(list.hidden);
+      });
+
+      header.appendChild(toggle);
+      header.appendChild(title);
+      header.appendChild(count);
+      wrap.appendChild(header);
+      wrap.appendChild(list);
+      container.appendChild(wrap);
+    });
+
+    container.hidden = false;
+  }
+  function renderSnapshotSummaryFromStorage() {
+    const container = document.getElementById('taskStateSummary');
+    if (!container) return;
+    const hasSession = !!(localStorage.getItem('sessionId') || sessionStorage.getItem('sessionId'));
+    if (!hasSession) { container.hidden = true; return; }
+    try {
+      const key = window.__SNAP_KEY__;
+      if (!key) { container.hidden = true; return; }
+      const raw = localStorage.getItem(key);
+      if (!raw) { container.hidden = true; return; }
+      const snap = JSON.parse(raw);
+      renderSnapshotSummary(snap);
+    } catch (err) {
+      console.warn('[index] renderSnapshotSummaryFromStorage error', err);
+      container.hidden = true;
+    }
+  }
 
   async function startPreload(){
     if (__preloadRunning) { console.log('[index] preload: already running, skip'); return; }
@@ -183,11 +384,14 @@
         localStorage.setItem(key, JSON.stringify(payload));
         console.log('[index] preload: snapshot saved', { key, tasks: Array.isArray(json.tasks)? json.tasks.length : -1,
                                                         stateKeys: json.states? Object.keys(json.states).length : 0 });
+        renderSnapshotSummary(payload);
       } else {
         console.warn('[index] preload: snapshot failed', json);
+        renderSnapshotSummaryFromStorage();
       }
     } catch(e){
       console.error('[index] preload error', e);
+      renderSnapshotSummaryFromStorage();
     } finally{
       const startLink = document.querySelector('a[href="main.html"], #startProgrammingButton, .start-program-btn, #primaryBtn');
       const st = document.getElementById('preloadStatus');
@@ -195,12 +399,19 @@
       if (startLink) startLink.style.display = ''; // 表示OK
       console.log('[index] preload: done');
       __preloadRunning = false;
+      renderSnapshotSummaryFromStorage();
     }
   }
 
   // DOM構築後、すでに sessionId があれば即プリロード
   document.addEventListener('DOMContentLoaded', () => {
-    if (localStorage.getItem('sessionId')) { console.log('[index] DOMContentLoaded: session present, preload now'); startPreload(); }
+    if (localStorage.getItem('sessionId')) {
+      console.log('[index] DOMContentLoaded: session present, preload now');
+      renderSnapshotSummaryFromStorage();
+      startPreload();
+    } else {
+      renderSnapshotSummaryFromStorage();
+    }
   });
   // セッションがvalidate後に確定した場合はこちらでプリロード開始
   window.addEventListener('session-ready', startPreload);
