@@ -1,0 +1,7 @@
+A. 「いまの状態を正（スナップショット）にする」
+git add -A
+git commit -m "chore: 作業スナップショット"
+
+
+B. 「編集中の差分を捨てたい」（コミットせずに元に戻す）
+git restore --staged --worktree .

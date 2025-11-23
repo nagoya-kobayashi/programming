@@ -30,10 +30,14 @@
   const taskSummary = document.getElementById('taskSummary');
   const gradingTable = document.getElementById('gradingTable');
   const saveStatus = document.getElementById('saveStatus');
+  const gradingTableWrapper = document.getElementById('gradingTableWrapper');
+  const submittedOnlyToggle = document.getElementById('submittedOnlyToggle');
 
   const cacheBaseKey = serverBaseUrl || 'default';
   const CLASS_CACHE_PREFIX = `grading.${cacheBaseKey}.cache.`;
   const USER_CLASS_PREFIX = `grading.${cacheBaseKey}.userClass.`;
+  const SUBMITTED_ONLY_KEY = `grading.${cacheBaseKey}.submittedOnly`;
+  let submittedOnly = false;
 
   const cloneDeep = (obj) => (obj ? JSON.parse(JSON.stringify(obj)) : obj);
   const pendingKeyFor = (classId, taskId) => `${classId || 'default'}::${taskId || ''}`;
@@ -86,9 +90,15 @@
   }
 
   function rememberUsersFromResponse(students = [], resolvedUserId, classId) {
-    if (!classId) return;
-    students.forEach(stu => rememberUserClass(stu.userId, classId));
-    if (resolvedUserId) rememberUserClass(resolvedUserId, classId);
+    const fallbackClass = String(classId || '').trim();
+    students.forEach(stu => {
+      const cls = stu && stu.classId ? String(stu.classId || '').trim() : fallbackClass;
+      rememberUserClass(stu && stu.userId, cls);
+    });
+    if (resolvedUserId) {
+      const resolvedClass = students.find(stu => stu && stu.userId === resolvedUserId)?.classId || fallbackClass;
+      rememberUserClass(resolvedUserId, resolvedClass);
+    }
   }
 
   function getCachedUserClass(userId) {
@@ -99,6 +109,27 @@
     } catch {
       return '';
     }
+  }
+
+  function loadSubmittedOnlySetting() {
+    try {
+      return localStorage.getItem(SUBMITTED_ONLY_KEY) === 'true';
+    } catch {
+      return false;
+    }
+  }
+
+  function persistSubmittedOnlySetting(value) {
+    submittedOnly = !!value;
+    try {
+      localStorage.setItem(SUBMITTED_ONLY_KEY, submittedOnly ? 'true' : 'false');
+    } catch {}
+    if (submittedOnlyToggle) submittedOnlyToggle.checked = submittedOnly;
+  }
+
+  submittedOnly = loadSubmittedOnlySetting();
+  if (submittedOnlyToggle) {
+    submittedOnlyToggle.checked = submittedOnly;
   }
 
   function mergeSubmissionSets(base = {}, incoming = {}) {
@@ -420,6 +451,7 @@
     state.selectedTaskId = taskId;
     state.selectedTaskTitle = title || (state.tasks.find(t => t.id === taskId)?.title || taskId);
     taskSummary.textContent = `表示中: ${state.selectedTaskTitle}`;
+    if (gradingTableWrapper) gradingTableWrapper.scrollTop = 0;
     renderTaskList();
     renderStudents();
   }
@@ -513,6 +545,7 @@
     }
     gradingTable.className = '';
     gradingTable.innerHTML = '';
+    let renderedCount = 0;
     state.students.forEach(student => {
       const submission = (state.submissions[student.userId] || {})[currentTaskId];
       const localEntry = ensureLocalGrade(student.userId, currentTaskId, submission);
@@ -521,6 +554,7 @@
       const manual = !submitted && !graded;
       const editable = submitted || graded || manual;
       const pending = isRowPending(currentTaskId, student.userId);
+      if (submittedOnly && !submitted) return;
       const card = document.createElement('article');
       card.className = 'student-card';
       card.dataset.userId = student.userId;
@@ -605,8 +639,25 @@
       evaluation.append(scoreLabel, commentLabel);
       card.append(meta, codeBlock, outputBlock, evaluation);
       gradingTable.appendChild(card);
+      renderedCount++;
     });
+    if (renderedCount === 0) {
+      gradingTable.className = 'empty-state';
+      gradingTable.textContent = submittedOnly ? '提出済みのユーザがいません。' : '対象の提出がありません。';
+      refreshActionAvailability();
+      return;
+    }
     refreshActionAvailability();
+  }
+
+  function focusFirstVisibleScoreInput(taskId) {
+    const cards = Array.from(document.querySelectorAll(`.student-card[data-task-id="${taskId || ''}"]`))
+      .filter(card => card.offsetParent !== null);
+    const targetInput = cards.length ? cards[0].querySelector('.score-input:not(:disabled)') : null;
+    if (targetInput) {
+      targetInput.focus();
+      targetInput.select();
+    }
   }
 
   function applySaveEntriesToTargets(targetSubmissions, targetLocalGrades, entries) {
@@ -659,7 +710,8 @@
       return;
     }
     const mode = document.querySelector('input[name="targetMode"]:checked')?.value || 'class';
-    const classValue = classInput.value.trim();
+    let classValue = classInput.value.trim();
+    if (classValue && classValue.toUpperCase() === 'ALL') classValue = 'ALL';
     const userValue = userInput.value.trim();
     if (mode === 'class' && !classValue) {
       showMessage('クラスIDを入力してください。', 'error');
@@ -733,6 +785,7 @@
       input.value = '100';
       input.dispatchEvent(new Event('input', { bubbles: true }));
     });
+    focusFirstVisibleScoreInput(currentTaskId);
   }
 
   async function handleSave() {
@@ -816,6 +869,13 @@
         refreshActionAvailability();
       }
     }
+  }
+
+  if (submittedOnlyToggle) {
+    submittedOnlyToggle.addEventListener('change', evt => {
+      persistSubmittedOnlySetting(!!evt.target.checked);
+      renderStudents();
+    });
   }
 
   loadButton.addEventListener('click', loadClassData);

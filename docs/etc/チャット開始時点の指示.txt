@@ -1,0 +1,155 @@
+プログラミング学習の環境を作っているんだけど、それを改良していきたい。これまで作成しているソース一式を添付ファイルとしてアップロードするのと、以下の文章で仕様などをレポートするので、しっかり読み込んで、まずは既知の不具合の対策をしてほしい。既存のソースコードを読み込んで、既知でない未発見の不具合があったら、それも直してほしい。そのうえで、修正版のソースコード一式を提示してほしい。
+
+
+システム仕様・開発履歴レポート
+概要
+
+このレポートは、ブラウザ上で動作する高校生向けプログラミング学習環境と、付属する課題エディタおよびサーバ連携機能についてまとめたものです。サーバ側は Google Apps Script による Web アプリとスプレッドシートを用い、クライアント側は HTML/CSS/JavaScript によるシングルページアプリケーションで構成されています。
+
+用語
+
+学習画面: 生徒が Python 課題を実行・保存・提出するページ (client/index.html)。
+
+課題エディタ: 教員が課題の内容やヒント・解答例を作成・保存するページ (client/task_editor.html)。
+
+セッション: ログイン後に発行される一意の文字列。1時間の有効期限があり、Apps Script の session シートに [SessionId, UserId, ClassId, Number, LastActive] 形式で保存する。
+
+① 動作仕様
+クライアント側（学習画面）
+
+画面構成：左側に課題一覧 (ul#taskList と li のリスト)、中央に問題文 (#problemTitle, #problemText) とヒント(div#hint)、右上にコードエディタ (<div id="editor"> と CodeMirror)、右下に実行結果表示 (<div id="output">)、下部に実行・停止・保存・提出ボタン (#runButton, #stopButton, #saveButton, #submitButton) およびステータス表示 (#statusMessage)。ページ上部には #studentInfo 領域に「クラス:○○ 出席番号:○○」または「クラス:? 出席番号:?」を表示。
+
+課題一覧：tasks.js で定義された課題配列を読み込み、renderTaskList() で <li> に dataset.taskId と課題タイトルを出力。採点状況に応じてアイコンの色を statusColors から設定。
+
+課題表示：selectTask(taskId) で選択された課題の本文・ヒント・解答例などを表示し、currentTaskId を更新。非同期でスプレッドシートから過去の保存データを取得し、currentTaskId が変わっていない場合のみコード/出力/ヒント状態を更新。キャッシュ (localStorage) にあれば先に表示し、後でサーバデータで置き換える。
+
+Python 実行：runCode() は Pyodide をロード済みか確認し、editor.getValue() でコードを取得、pyodide.runPythonAsync() を呼び出す。実行時はrunning=trueとし、停止ボタン (#stopButton) を有効にする。stdout/stderr は console.log() にバッチ送信し、エラーは赤字で表示。input() が検出されると実行結果エリアにプロンプトとインライン入力フィールドを生成し、Enter で値を返す。
+
+保存：saveToServer(submittedFlag) は sessionId、taskId、コード、出力、hintOpened、submitted を application/x-www-form-urlencoded 形式で Apps Script に送信。保存成功時にはステータスメッセージ「保存しました」を緑文字で表示し、10秒後に消す。
+
+提出：submitToServer() は saveToServer(true) を呼び出し、その後 taskSubmitted[currentTaskId]=true として課題をロックし、提出ボタンを「提出取り消し」ボタンに変える。提出取り消しボタンで saveToServer(false) を呼び出しロック解除。
+
+ヒント：#hintButton を押すと #hint エリアを展開し、hintOpened=true にして即時 saveToServer() を呼び出す。提出済みの場合はボタンを無効にする。スプレッドシートの HintOpened 値を取得する際は Apps Script で String(...).toLowerCase()==='true' として大文字/小文字を無視して読み取る。
+
+オートセーブ：restartAutosaveTimer() によりコード編集または実行後に10秒間操作が無い場合、自動的に saveToServer(false) が呼ばれる。ただし課題が提出済みの場合は動作しない。
+
+ログアウト：logoutButton をクリックすると fetch(APP_CONFIG.serverBaseUrl+'?action=logout&session='+sessionId) を送り、セッションを削除後 sessionStorage.clear() して login.html に遷移。
+
+セッション切れ：サーバからのレスポンスが status:error かつ message:'Session expired' の場合 handleSessionExpired() を呼び、「セッションタイムアウト」と表示してから login.html?id=userId へリダイレクト。
+
+クライアント側（課題エディタ）
+
+画面構成：左に課題フォルダ・課題一覧 (#taskTree)、中央左に課題タイトル入力 (#taskTitle)、問題文とヒント用の textarea (#taskDesc, #taskHint)、右側に解答例と初期コード用 CodeMirror エディタ (#answerEditor, #initialEditor)、下部に保存ボタン (#saveTaskButton) とステータスメッセージ (#taskStatusMsg)。
+
+フォルダ管理：課題は階層構造で管理。ParentId を持つレコードはその課題の親フォルダ ID。IsFolder が TRUE の行はフォルダ。loadTaskList() が Apps Script の getTasks アクションを呼び出し、各レコードをツリー状に表示。
+
+新規作成／編集：saveTask() は sessionId、taskId（新規は空）、title、descriptionHtml、hintHtml、answerCode、initialCode、parentId、isFolder を送信し、Apps Script の saveTask で保存。保存するとステータスに「保存しました」が表示される。
+
+読み込み：課題一覧で項目をクリックすると populateTaskForm() が実行され、対象課題データを取得してフォームへセット。ツリー選択時に同時に他の課題データを読み込まないように currentEditingTaskId をチェック。
+
+サーバ側（Google Apps Script）
+
+ユーザ認証 (action=login)：user シートから [ID, Password, ClassId, Number] を検索し、正しければ sessionId を生成。session シートに [sessionId, userId, classId, number, lastActive] を挿入。レスポンス {status:'ok', sessionId, classId, number} を返す。不正な場合は {status:'error', message:'Login failed'}。
+
+セッション検証 (session パラメータ)：validateSession(sessionId) で session シートの対応行を探し、lastActive を現在時刻に更新しつつ [userId, classId, number] を返す。有効期限は60分。
+
+課題保存 (action=saveTask)：URL エンコードされたボディを +→スペース、decodeURIComponent で解読し、sessionId を検証。データを task シートに書き込む。既存行があれば上書き。列順は [TaskId, ParentId, IsFolder, Title, DescriptionHtml, HintHtml, AnswerCode, InitialCode]。戻り値は {status:'ok'}。
+
+課題取得 (action=getTasks)：sessionId を検証後、task シート全行を JSON 配列で返す。Apps Script 側で HintOpened や Submitted の TRUE/FALSE を小文字化して返すように修正。【重点事項】
+
+コード保存 (doPost)：saveTaskData(ss, userId, taskId, code, output, hintOpened, submitted) を呼び出しユーザIDシートに書き込む。保存時刻・提出状態も記録。
+
+コード読み出し (doGet with session + taskId)：ユーザIDシートの該当行を読み込み、{code, output, hintOpened, submitted} を返す。HintOpened と Submitted は大文字小文字を無視して比較している。
+
+ログアウト (action=logout)：removeSession(ss, sessionId) で session シートから該当行を削除し、{status:'ok'} を返す。
+
+② 実行環境前提
+項目	要件/設定
+OS/ブラウザ	クライアントは Chromium/Chrome 最新版で検証。Python をブラウザ上で実行するため、WebAssembly 対応ブラウザが必要。
+サーバ	Google Apps Script + Google スプレッドシート。Apps Script Web アプリにデプロイし、匿名アクセスを許可。ID は serverBaseUrl で指定。
+ネットワーク	学校のプロキシ/iFILTER が OPTIONS メソッドを遮断するため、クライアントからのリクエストは POST + application/x-www-form-urlencoded 形式に限定し、プリフライトを避ける
+hub.ebsi.eu
+。
+CORS	Apps Script から Access-Control-Allow-Origin ヘッダーを出さない設定でも、上記形式ならプリフライトが発生しないため、ブラウザは許可。
+保存先シート構成	スプレッドシートに user（ID/Password/Class/Number）、session（セッション管理）、task（課題定義）、<UserID>（生徒ごとのコード保存）が必要。
+タイムゾーン	すべての日時処理は Asia/Tokyo を想定。Apps Script の Utilities.formatDate() で指定。
+③ ソース構成
+root/
+├── client/
+│   ├── index.html              # 学習画面（Python 実行・保存・提出）
+│   ├── task_editor.html        # 課題エディタ画面（フォルダ階層・HTML入力）
+│   ├── login.html              # ID・Password 入力によるログイン画面
+│   ├── register.html           # 新規登録画面
+│   ├── change_password.html    # パスワード変更画面
+│   ├── config.js               # `serverBaseUrl` 等クライアント設定値
+│   ├── tasks.js                # 学習画面用ダミー課題データ
+│   ├── main.js                 # 学習画面用ロジック
+│   ├── task_editor.js          # 課題エディタロジック
+│   ├── login.js, register.js   # 認証フロー
+│   ├── change_password.js      # パスワード変更フロー
+│   └── style.css               # 共通スタイル
+└── google_apps_script/
+    └── Code.gs                 # Apps Script サーバロジック
+
+主要ファイルと責務
+ファイル/関数(クライアント)	主な役割
+client/main.js	課題一覧表示 (renderTaskList)、課題選択 (selectTask)、Python実行 (runCode)、保存/提出 (saveToServer submitToServer)、セッション管理 (init logoutButton)、ヒント・オートセーブ・キャッシュ処理、提出取り消し、UI更新等。
+client/task_editor.js	課題一覧読み込み (loadTaskList)、課題フォーム表示 (populateTaskForm)、新規/編集保存 (saveTask)、階層表示生成 (computeLevel)、CodeMirror 初期化等。
+client/login.js	ログイン送信 (action=login)、成功時は sessionId とユーザ情報を sessionStorage に保存し index.html へ遷移。エラー表示。
+client/register.js	新規登録送信 (action=register)。ユーザシートへ ID/Password/Class/Number を登録し、ユーザID名のシートを作成。
+client/change_password.js	パスワード変更送信 (action=changePassword)。ユーザ認証後、新しいパスワードに更新。
+client/style.css	学習画面と課題エディタ共通のレイアウト定義（フレックスレイアウト、ヒント・出力エリア色、ボタンの disabled 状態等）。
+google_apps_script/Code.gs	全ての HTTP エンドポイントを処理。doGet(e) で `action=login
+④ 修正履歴と判断根拠（主要部分）
+時期 (推定)	変更内容	理由・判断根拠
+10/16	最初の学習画面と基本保存・提出機能を作成。採点用 Perl スクリプトと Google Apps Script 版を比較し、ネットワーク制限のない環境では Apps Script を採用。	プロキシが OPTIONS を遮断するため、プリフライトの起きない方法が必要。
+hub.ebsi.eu
+
+10/17	入力プロンプトを実行結果エリア横に表示、プラス記号と空白のエンコード問題を修正、ヒント閲覧即時保存、保存・提出後のステータスメッセージを10秒で消去するよう追加。	学習者のUX改善。application/x-www-form-urlencoded では空白を+に変換する仕様と衝突するためサーバ側で+→空白に戻す処理を追加。
+10/17	ログイン機能をセッションベースに変更し、URLに個人情報を載せないよう修正。session シート追加、ログアウト機能、セッション有効期限（60分）を実装。	セキュリティ向上（IDやパスワード漏えい防止）とユーザ体験向上のため。
+10/18	課題エディタ（task_editor.html/js）を作成。課題を階層構造で管理し、HTMLによる問題文・ヒント、解答例・初期コードの入力を可能に。	教員が柔軟に課題を追加・編集できるようにするため。
+10/19	課題切り替え時に前回リクエストのデータが上書きしないよう requestId を利用して非同期競合を回避。ローカルキャッシュを先に表示し、後からサーバデータで置き換える仕組みを実装。	課題読み込み時のUX改善。
+10/19	タスクエディタ側の課題保存が反映されない不具合を調査し、Apps Script saveTask アクションに合わせてデータ形式や URL を統一。	学習画面と同じ送信形式に統一することで CORS制限を回避し、データ反映を安定させるため。
+⑤ 既知の不具合・環境依存
+症状・再現条件	原因の仮説	暫定／恒久対応
+Apps Script の loadTaskData が HintOpened 列を大文字判定しており、TRUE/FALSE を小文字に変換しないと常に false とみなす。	Apps Script で大文字のまま比較していたため。	String(value).toLowerCase() で比較するよう修正する。
+課題エディタの保存が反映されない場合がある。	task_editor.js で fetch の URL に誤ったパスを付与しプリフライトが発生している、または sessionId 送信漏れ。	学習画面と同じ fetch(APP_CONFIG.serverBaseUrl, {...}) 形式に統一し、sessionId を含める。
+読み込み中表示が消えず残ることがある。	非同期処理終了後に currentTaskId が変わっている場合でも読み込みメッセージを消していない。	読み込み完了時に if (currentTaskId===requestId) のチェック後、必ず loading メッセージ要素を空にする。
+HELP ボタンのクリップボード操作が環境により失敗する。	navigator.clipboard.writeText() が非HTTPSや権限未付与で拒否される。	try/catch で失敗時には document.execCommand('copy') にフォールバックする。
+⑥ 継続タスク
+タスク	優先度	所要目安
+課題エディタと学習画面の課題ロードを統合し、課題定義を task シートから読み込む仕組みに一本化する。	高	1〜2日
+課題エディタのUI改善（ツリー表示のドラッグ&ドロップ、フォルダ作成UI、バリデーション等）。	中	数日
+Apps Script のエラー処理強化（無効なセッション時のレスポンス統一、JSON parse エラー検出など）。	中	1日
+クライアント側で未提出課題の自動提出締切リマインダ機能を追加する。	低	数日
+⑦ 再現手順
+
+準備
+
+Google スプレッドシートを新規作成し、シート名 user・session・task を用意。user は1行目に ID,Password,ClassId,Number のヘッダを配置し、生徒情報を登録する。task シートはヘッダとして [TaskId, ParentId, IsFolder, Title, DescriptionHtml, HintHtml, AnswerCode, InitialCode] を追加する。
+
+Apps Script エディタを開き、本レポート付属の google_apps_script/Code.gs を貼り付ける。SPREADSHEET_ID を自身のスプレッドシートIDに変更し、Webアプリとしてデプロイ（アクセス権は「全員」に）。デプロイURLを client/config.js の serverBaseUrl に設定する。
+
+リポジトリから client ディレクトリを Web サーバの /web/programming/ 等に配置。client/config.js の serverBaseUrl と SPREADSHEET_ID を設定する。HTTPSで提供することを推奨。
+
+ログイン・ユーザ登録
+
+register.html?id=<Windowsログイン名> を開き、パスワード・クラス・出席番号を入力して登録。成功すると user シートに行が追加され、個別シート <ID> が作成される。
+
+login.html で ID とパスワードを入力しログイン。Apps Script から sessionId が返り、sessionStorage に保存されて index.html に遷移する。
+
+課題作成
+
+task_editor.html にアクセスし、左側で新規フォルダ/課題を追加。タイトル、問題文 (HTML)、ヒント (HTML)、解答例、初期コードを入力し保存。Apps Script の task シートに行が追加され、ParentId を指定すれば階層化される。
+
+学習画面
+
+index.html を開くと課題一覧が表示される。課題を選択するとローカルキャッシュにあれば即座に表示し、その後サーバからのデータで更新。コードを編集し 実行 ボタンで Pyodide により実行、保存 ボタンで現在のコードと出力をサーバに送信。提出 ボタンで提出済みとしてロックされる。
+
+ヒントを表示すると即時保存され、スプレッドシートの HintOpened が TRUE になる。提出済みの場合ヒントを表示できない。
+
+その他
+
+セッションはログインから60分間有効。logoutButton で手動ログアウト可。セッションが期限切れになると自動でログイン画面に戻される。
+
+Apps Script のタスク保存/取得が失敗する場合は、Google Apps Script 側のログとデプロイ URL、スプレッドシートの権限を確認する。コードが setHeader や setHeaders を呼び出していないかも要チェック。
