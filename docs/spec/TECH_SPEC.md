@@ -6,6 +6,7 @@
 ### index.html（トップ画面）
 - 目的: セッションの有効性を確認し、学習画面 (main.html) もしくはログイン画面 (login.html) への遷移を制御します。課題のスナップショットを先読みし、ローカルキャッシュに保存します。
 - 主な要素: 遷移ボタン #primaryBtn、現在のクラス/番号表示 #meta、案内メッセージ #note、スナップショット取得中のトースト #preloadStatus。
+- 状態サマリ: ログイン済みで課題一覧と snapshot を取得した時点で、「プログラミングをはじめる」ボタン直下にクリア済/採点済/提出済/未提出ごとの折りたたみ一覧を表示します。状態名の左に学習画面と同じアイコン（クリア済は金色スター、それ以外は状態色の●）、右に件数を付け、展開するとフォルダ構成を含む課題フルパス名と「この課題からはじめる」ボタンを列挙します（選択状態をローカルストレージに保存して main.html に遷移）。
 - 初期化フロー (main()): URL の sid パラメータと localStorage.sessionId を検証し、GAS に action=ping を送信します。成功/失敗にかかわらず {status:'ok'} 扱いとし、ボタンの表示を切り替えます。続いて startPreload() により action=getUserSnapshot を POST し、取得した tasks と学習状態を localStorage["learn.snapshot.<server>"] に保存します。
 - 遷移: セッション有効時に #primaryBtn のクリックで main.html へ、無効時は login.html へ遷移します。window.dispatchEvent('session-ready') により他タブへも通知します。
 
