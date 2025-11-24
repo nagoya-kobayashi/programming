@@ -8,6 +8,18 @@
     { key: 'submitted', label: '提出済', className: 'submitted' },
     { key: 'pending', label: '未提出', className: 'pending' },
   ];
+  const normalizeAttribute = (value, pathHint) => {
+    const s = String(value || '').replace(/\s+/g, '').trim();
+    const allowed = ['基礎', '演習', '発展', 'その他'];
+    if (s && allowed.includes(s)) return s;
+    const parts = String(pathHint || '').split(' / ').filter(Boolean);
+    const second = parts.length >= 2 ? parts[1] : (parts[0] || '');
+    if (allowed.includes(second)) return second;
+    if (/基礎/.test(second)) return '基礎';
+    if (/演習/.test(second)) return '演習';
+    if (/発展/.test(second)) return '発展';
+    return 'その他';
+  };
 
   const state = {
     classes: [],
@@ -356,6 +368,12 @@
       state.generatedAt = data.generatedAt || '';
       state.source = data.source || (rebuild ? 'rebuilt' : 'cached');
       if (rebuild) state.hiddenClasses.clear();
+      state.rows = state.rows
+        .map(r => ({ ...r, attribute: normalizeAttribute(r.attribute, r.path) }))
+        .filter(r => r.isFolder || r.attribute !== 'その他');
+      state.tasks = state.tasks
+        .map(t => ({ ...t, attribute: normalizeAttribute(t.attribute, t.path) }))
+        .filter(t => t.isFolder || t.attribute !== 'その他');
 
       collapsedFolders.clear();
       state.tasks.filter(t => t.isFolder).forEach(t => collapsedFolders.add(t.taskId));

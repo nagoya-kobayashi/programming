@@ -19,16 +19,21 @@ function applyTasksData(normalized) {
     saveCollapsedState();
   }
 
-  tasksData = normalized.map(t => ({
-    id: t.TaskId,
-    title: t.Title || t.TaskId,
-    description: t.DescriptionHtml || '',
-    hint: t.HintHtml || '',
-    answer: t.AnswerCode || '',
-    initialCode: t.InitialCode || '',
-    parentId: t.ParentId || '',
-    isFolder: !!t.IsFolder
-  }));
+  const pathMap = buildTaskPathMapForClient(normalized);
+  tasksData = normalized.map(t => {
+    const attr = normalizeAttribute(t.Attribute) || guessAttributeFromPath(t.TaskId, pathMap) || "その他";
+    return {
+      id: t.TaskId,
+      title: t.Title || t.TaskId,
+      description: t.DescriptionHtml || '',
+      hint: t.HintHtml || '',
+      answer: t.AnswerCode || '',
+      initialCode: t.InitialCode || '',
+      parentId: t.ParentId || '',
+      isFolder: !!t.IsFolder,
+      attribute: attr
+    };
+  });
 }
 
 async function loadTaskListFromServer() {
@@ -78,6 +83,7 @@ function normalizeTasks(raw) {
       initialcode: headerRow.indexOf("initialcode"),
       parentid: headerRow.indexOf("parentid"),
       isfolder: headerRow.indexOf("isfolder"),
+      attribute: headerRow.indexOf("attribute"),
     };
     return rows.map(r => {
       const obj = {
@@ -89,6 +95,7 @@ function normalizeTasks(raw) {
         InitialCode: getCell(r, idx.initialcode),
         ParentId: getCell(r, idx.parentid),
         IsFolder: toBool(getCell(r, idx.isfolder)),
+        Attribute: getCell(r, idx.attribute),
       };
       return normalizeTaskObject(obj);
     }).filter(t => t.TaskId);
@@ -113,8 +120,51 @@ function normalizeTaskObject(t) {
     AnswerCode: pick(t, ["AnswerCode","answerCode","answer","Answer"]),
     InitialCode: pick(t, ["InitialCode","initialCode"]),
     ParentId: pick(t, ["ParentId","parentId","parentid"]),
-    IsFolder: toBool(pick(t, ["IsFolder","isFolder","isfolder"]))
+    IsFolder: toBool(pick(t, ["IsFolder","isFolder","isfolder"])),
+    Attribute: pick(t, ["Attribute","attribute"])
   };
+}
+function normalizeAttribute(raw) {
+  const s = String(raw || "").replace(/\s+/g, "").trim();
+  const allowed = ["基礎", "演習", "発展", "その他"];
+  if (!s) return "";
+  return allowed.includes(s) ? s : "";
+}
+function guessAttributeFromPath(taskId, pathMap) {
+  const path = pathMap && pathMap[String(taskId)] ? String(pathMap[String(taskId)]) : "";
+  if (!path) return "その他";
+  const parts = path.split(" / ").filter(Boolean);
+  const second = parts.length >= 2 ? parts[1] : (parts[0] || "");
+  const lower = second.toLowerCase();
+  if (lower.includes("基礎") || /^\(?\s*1/.test(lower)) return "基礎";
+  if (lower.includes("演習") || /^\(?\s*2/.test(lower)) return "演習";
+  if (lower.includes("発展") || /^\(?\s*3/.test(lower)) return "発展";
+  if (lower.includes("その他")) return "その他";
+  return "その他";
+}
+function buildTaskPathMapForClient(tasks) {
+  const map = new Map();
+  tasks.forEach(t => map.set(String(t.TaskId), { id: String(t.TaskId), parentId: String(t.ParentId || ""), title: t.Title || String(t.TaskId), isFolder: !!t.IsFolder }));
+  const cache = {};
+  const visiting = new Set();
+  const resolve = (id) => {
+    const key = String(id || "");
+    if (!key) return "";
+    if (cache[key]) return cache[key];
+    if (visiting.has(key)) return key;
+    visiting.add(key);
+    const t = map.get(key);
+    if (!t) { visiting.delete(key); return key; }
+    const self = t.title || key;
+    const parentId = t.parentId && map.has(String(t.parentId)) ? String(t.parentId) : '';
+    const parentPath = parentId ? resolve(parentId) : '';
+    const path = parentPath ? `${parentPath} / ${self}` : self;
+    cache[key] = path;
+    visiting.delete(key);
+    return path;
+  };
+  tasks.forEach(t => { if (!t.IsFolder) resolve(t.TaskId); });
+  return cache;
 }
 
 function renderTaskTree() {
@@ -122,10 +172,13 @@ function renderTaskTree() {
   while (ul.firstChild) ul.removeChild(ul.firstChild);
 
   const byParent = new Map();
+  const buildChild = (key, item) => {
+    if (!byParent.has(key)) byParent.set(key, []);
+    byParent.get(key).push(item);
+  };
   tasksData.forEach(t => {
     const key = t.parentId || "";
-    if (!byParent.has(key)) byParent.set(key, []);
-    byParent.get(key).push(t);
+    buildChild(key, t);
   });
 
   const sortChildren = (arr) => {
@@ -136,6 +189,8 @@ function renderTaskTree() {
       return (a.title || "").localeCompare(b.title || "");
     });
   };
+
+  const folderCounts = computeFolderCompletionMap(byParent);
 
   const renderGroup = (parentId, level) => {
     const list = byParent.get(parentId || "") || [];
@@ -166,7 +221,9 @@ function renderTaskTree() {
       }
 
       if (item.isFolder) {
-        li.appendChild(Object.assign(document.createElement("span"), { className: "icon-ph" }));
+        const folderIcon = document.createElement("span");
+        folderIcon.className = "folder-icon-slot icon-ph";
+        li.appendChild(folderIcon);
       } else {
         const icon = document.createElement("span");
         icon.className = "task-icon dot-icon";
@@ -180,6 +237,28 @@ function renderTaskTree() {
       titleCell.className = "title-cell";
       titleCell.textContent = item.title || item.id;
       li.appendChild(titleCell);
+
+      if (item.isFolder) {
+        const counts = folderCounts.get(item.id) || { cleared: 0, total: 0 };
+        const countWrap = document.createElement("span");
+        countWrap.className = "folder-count";
+        const cleared = document.createElement("span");
+        let clearedClass = "";
+        if (counts.total > 0) {
+          clearedClass = counts.cleared === counts.total ? " all-cleared" : " has-remaining";
+        }
+        cleared.className = "folder-count-cleared" + clearedClass;
+        cleared.textContent = counts.cleared;
+        const slash = document.createElement("span");
+        slash.textContent = " / ";
+        const total = document.createElement("span");
+        total.className = "folder-count-total";
+        total.textContent = counts.total;
+        countWrap.appendChild(cleared);
+        countWrap.appendChild(slash);
+        countWrap.appendChild(total);
+        li.appendChild(countWrap);
+      }
 
       if (!item.isFolder) {
         const badge = document.createElement("span");
@@ -208,6 +287,7 @@ function renderTaskTree() {
 
   applyResultsToList();
   updateStatusBadges();
+  updateFolderCompletionIndicators();
   if (currentTaskId) saveLocalState(currentTaskId);
 }
 
@@ -304,12 +384,22 @@ function getResultForTask(taskId) {
 }
 function isPerfectScore(taskId) {
   if (!taskId) return false;
+  if (typeof isTaskExcluded === "function" && isTaskExcluded(taskId)) return false;
   const result = getResultForTask(taskId);
   if (!result) return false;
   const numeric = Number(result.score);
   return !hasAnySubmittedRecord(taskId) && !isDirtyRecord(taskId) && !Number.isNaN(numeric) && numeric === 100;
 }
+function isTaskCleared(taskId) {
+  if (!taskId) return false;
+  if (typeof isTaskExcluded === "function" && isTaskExcluded(taskId)) return false;
+  const result = getResultForTask(taskId);
+  if (!result) return false;
+  const numeric = Number(result.score);
+  return !Number.isNaN(numeric) && numeric === 100;
+}
 function computeStatusKey(taskId) {
+  if (typeof isTaskExcluded === "function" && isTaskExcluded(taskId)) return "excluded";
   if (hasAnySubmittedRecord(taskId)) return "submitted";
   if (isDirtyRecord(taskId)) return "editing";
   const result = getResultForTask(taskId);
@@ -321,6 +411,8 @@ function applyResultsToList() {
   document.querySelectorAll("#taskList li").forEach(li => {
     const icon = li.querySelector(".task-icon"); if (!icon) return;
     const taskId = li.dataset.taskId;
+    const meta = tasksData.find(t => t.id === taskId);
+    if (meta && meta.isFolder) return;
     const status = computeStatusKey(taskId);
     const perfect = isPerfectScore(taskId);
     const color = statusColors[status] || statusColors.empty;
@@ -341,11 +433,16 @@ function applyResultsToList() {
   if (typeof updateCommentBubble === "function" && typeof currentTaskId !== "undefined") {
     updateCommentBubble(currentTaskId || null);
   }
+  updateFolderCompletionIndicators();
 }
 function updateStatusBadges() {
   document.querySelectorAll("#taskList li").forEach(li => {
     const badge = li.querySelector(".status-badge"); if (!badge) return;
     const taskId = li.dataset.taskId;
+    if (typeof isTaskExcluded === "function" && isTaskExcluded(taskId)) {
+      badge.textContent = "[採点対象外]";
+      return;
+    }
     const result = getResultForTask(taskId);
     let label = "";
     if (hasAnySubmittedRecord(taskId)) {
@@ -359,5 +456,72 @@ function updateStatusBadges() {
     }
     else if (hasAnySavedRecord(taskId)) label = "[保存済]";
     badge.textContent = label;
+  });
+}
+function computeFolderCompletionMap(byParent) {
+  const memo = new Map();
+  const dfs = (pid) => {
+    const key = pid || "";
+    if (memo.has(key)) return memo.get(key);
+    const children = byParent.get(key) || [];
+    let cleared = 0;
+    let total = 0;
+    children.forEach(child => {
+      if (child.isFolder) {
+        const res = dfs(child.id);
+        cleared += res.cleared;
+        total += res.total;
+      } else {
+        if (typeof isTaskExcluded === "function" && isTaskExcluded(child.id)) return;
+        total += 1;
+        if (isTaskCleared(child.id)) cleared += 1;
+      }
+    });
+    const res = { cleared, total };
+    memo.set(key, res);
+    return res;
+  };
+  tasksData.filter(t => t.isFolder).forEach(f => dfs(f.id));
+  dfs("");
+  return memo;
+}
+function updateFolderCompletionIndicators() {
+  const byParent = new Map();
+  tasksData.forEach(t => {
+    const key = t.parentId || "";
+    if (!byParent.has(key)) byParent.set(key, []);
+    byParent.get(key).push(t);
+  });
+  const countsMap = computeFolderCompletionMap(byParent);
+  document.querySelectorAll("#taskList li.folder-item").forEach(li => {
+    const folderId = li.dataset.taskId || "";
+    const counts = countsMap.get(folderId) || { cleared: 0, total: 0 };
+    const icon = li.querySelector(".folder-icon-slot");
+    if (icon) {
+      const allCleared = counts.total > 0 && counts.cleared === counts.total;
+      if (allCleared) {
+        icon.className = "folder-icon-slot task-icon sparkle-star folder-star";
+        icon.textContent = "★";
+      } else {
+        icon.className = "folder-icon-slot icon-ph";
+        icon.textContent = "";
+      }
+    }
+    const countWrap = li.querySelector(".folder-count");
+    if (!countWrap) return;
+    const clearedEl = countWrap.querySelector(".folder-count-cleared");
+    const totalEl = countWrap.querySelector(".folder-count-total");
+    if (clearedEl) {
+      clearedEl.textContent = counts.cleared;
+      clearedEl.classList.remove("all-cleared", "has-remaining");
+      if (counts.total > 0) {
+        if (counts.cleared === counts.total) {
+          clearedEl.classList.add("all-cleared");
+        } else {
+          clearedEl.classList.add("has-remaining");
+        }
+      }
+    }
+    if (totalEl) totalEl.textContent = counts.total;
   });
 }

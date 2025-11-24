@@ -46,6 +46,12 @@
 
   const cloneDeep = (obj) => (obj ? JSON.parse(JSON.stringify(obj)) : obj);
   const pendingKeyFor = (classId, taskId) => `${classId || 'default'}::${taskId || ''}`;
+  const normalizeAttribute = (value) => {
+    const s = String(value || '').replace(/\s+/g, '').trim();
+    const allowed = ['基礎', '演習', '発展', 'その他'];
+    if (!s) return 'その他';
+    return allowed.includes(s) ? s : 'その他';
+  };
 
   function showMessage(text, type = '') {
     globalMessage.textContent = text || '';
@@ -524,9 +530,19 @@
       clearPlotPreviews();
     }
     state.tasks = Array.isArray(data.tasks) ? data.tasks : [];
+    const allowedTaskIds = new Set(state.tasks.map(t => t.id));
     state.roots = buildTaskTree(state.tasks);
     state.students = Array.isArray(data.students) ? data.students : [];
     state.submissions = data.submissions || {};
+    if (allowedTaskIds.size) {
+      Object.keys(state.submissions).forEach(uid => {
+        const entries = state.submissions[uid];
+        if (!entries) return;
+        Object.keys(entries).forEach(tid => {
+          if (!allowedTaskIds.has(tid)) delete entries[tid];
+        });
+      });
+    }
     state.localGrades = data.localGrades || {};
     state.latestFetchedAt = data.fetchedAt || state.latestFetchedAt || '';
     prepareLocalGradesFromSubmissions();
@@ -571,16 +587,21 @@
         taskid: header.indexOf('taskid'),
         title: header.indexOf('title'),
         parent: header.indexOf('parentid'),
-        isFolder: header.indexOf('isfolder')
+        isFolder: header.indexOf('isfolder'),
+        attribute: header.indexOf('attribute')
       };
       rows.forEach((row, order) => {
         const id = getCell(row, idx.taskid);
         if (!id) return;
+        const attribute = normalizeAttribute(getCell(row, idx.attribute));
+        const isFolder = toBool(getCell(row, idx.isFolder));
+        if (!isFolder && attribute === 'その他') return;
         result.push({
           id,
           title: getCell(row, idx.title) || id,
           parentId: getCell(row, idx.parent),
-          isFolder: toBool(getCell(row, idx.isFolder)),
+          isFolder,
+          attribute,
           order
         });
       });
@@ -590,11 +611,15 @@
       raw.forEach((row, order) => {
         const id = row.TaskId || row.taskId;
         if (!id) return;
+        const attribute = normalizeAttribute(row.Attribute || row.attribute);
+        const isFolder = !!row.IsFolder;
+        if (!isFolder && attribute === 'その他') return;
         result.push({
           id,
           title: row.Title || row.title || id,
           parentId: row.ParentId || row.parentId || '',
-          isFolder: !!row.IsFolder,
+          isFolder,
+          attribute,
           order
         });
       });

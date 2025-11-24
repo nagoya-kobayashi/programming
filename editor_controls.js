@@ -71,10 +71,11 @@ function enableSaveSubmitButtons(){
   const stopBtn = document.getElementById("stopIconButton");
   const saveBtn = document.getElementById("saveButton");
   const submitBtn = document.getElementById("submitButton");
+  const blockSubmit = typeof isTaskExcluded === "function" && isTaskExcluded(currentTaskId);
   if (runBtn) runBtn.disabled = false;
   if (stopBtn) stopBtn.disabled = false;
   if (saveBtn) saveBtn.disabled = false;
-  if (submitBtn) submitBtn.disabled = false;
+  if (submitBtn) submitBtn.disabled = !!blockSubmit;
 }
 
 let statusTimerId = null;

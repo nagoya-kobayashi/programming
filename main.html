@@ -57,6 +57,28 @@
       text-shadow:0 0 2px rgba(0,0,0,.18), 0 0 8px rgba(255,255,255,.45);
     }
     .icon-ph  { width: 22px; height: 22px; display:inline-block; }
+    .folder-count {
+      margin-left: auto;
+      font-size: 12px;
+      color: #666;
+      display: inline-flex;
+      align-items: center;
+      gap: 2px;
+      position: sticky;
+      right: 0;
+      padding: 1px 6px;
+      border: 1px solid #d9d9d9;
+      border-radius: 4px;
+      background: #fff;
+      box-shadow: -4px 0 6px -4px rgba(0,0,0,.12);
+    }
+    .folder-count .folder-count-cleared { min-width: 1.5em; text-align: right; font-variant-numeric: tabular-nums; }
+    .folder-count .folder-count-total { font-variant-numeric: tabular-nums; }
+    .folder-count .has-remaining { color: #1890ff; font-weight: 700; }
+    .folder-count .all-cleared { color: #52c41a; font-weight: 700; }
+    .folder-icon-slot { display: inline-flex; align-items: center; justify-content: center; }
+    .folder-star { margin-right: 0.15rem; }
+    .folder-count span { line-height: 1.2; }
 
     .title-cell { overflow: hidden; text-overflow: ellipsis; }
     .status-badge {

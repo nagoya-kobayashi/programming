@@ -185,6 +185,12 @@
   const SELECTED_KEY = () => BASE_KEY('selectedTask');
   function canonicalHeader(h) { return String(h || '').replace(/^\uFEFF/, '').trim().toLowerCase(); }
   function toBool(v) { const s = String(v || '').trim().toLowerCase(); return s === 'true' || s === '1' || s === 'yes' || s === 'y'; }
+  function normalizeAttribute(value) {
+    const s = String(value || '').replace(/\s+/g, '').trim();
+    const allowed = ['基礎', '演習', '発展', 'その他'];
+    if (!s) return 'その他';
+    return allowed.includes(s) ? s : 'その他';
+  }
   function normalizeSnapshotTasks(raw) {
     if (!Array.isArray(raw) || raw.length === 0) return [];
     if (Array.isArray(raw[0])) {
@@ -194,14 +200,16 @@
         taskid: headerRow.indexOf('taskid'),
         title: headerRow.indexOf('title'),
         parentid: headerRow.indexOf('parentid'),
-        isfolder: headerRow.indexOf('isfolder')
+        isfolder: headerRow.indexOf('isfolder'),
+        attribute: headerRow.indexOf('attribute')
       };
       const pick = (row, i) => (i >= 0 && i != null) ? row[i] : '';
       return rows.map(r => ({
         id: pick(r, idx.taskid) || '',
         title: pick(r, idx.title) || pick(r, idx.taskid) || '',
         parentId: pick(r, idx.parentid) || '',
-        isFolder: toBool(pick(r, idx.isfolder))
+        isFolder: toBool(pick(r, idx.isfolder)),
+        attribute: normalizeAttribute(pick(r, idx.attribute))
       })).filter(t => t.id);
     }
     if (typeof raw[0] === 'object') {
@@ -209,7 +217,8 @@
         id: obj.TaskId || obj.taskId || obj.taskid || '',
         title: obj.Title || obj.title || obj.TaskId || obj.taskId || obj.taskid || '',
         parentId: obj.ParentId || obj.parentId || obj.parentid || '',
-        isFolder: toBool(obj.IsFolder || obj.isFolder || obj.isfolder)
+        isFolder: toBool(obj.IsFolder || obj.isFolder || obj.isfolder),
+        attribute: normalizeAttribute(obj.Attribute || obj.attribute)
       })).filter(t => t.id);
     }
     return [];
@@ -243,6 +252,7 @@
     const { cache: pathMap, map } = buildTaskPathMap(tasks);
     tasks.forEach(t => {
       if (t.isFolder) return;
+      if (normalizeAttribute(t.attribute) === 'その他') return;
       const state = stateMap[t.id] || {};
       const submitted = toBool(state.submitted);
       const scoreRaw = state.score;

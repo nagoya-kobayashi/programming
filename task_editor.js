@@ -72,6 +72,7 @@
         InitialCode: "",
         ParentId: $("taskParentId").value || "",
         IsFolder: false,
+        Attribute: "",
       });
       setActiveTask(null);
       setStatus("");
@@ -89,6 +90,7 @@
         InitialCode: "",
         ParentId: $("taskParentId").value || "",
         IsFolder: true,
+        Attribute: "",
       });
       setActiveTask(null);
       setStatus("フォルダを作成します。タイトルと（必要なら）親フォルダを選んで保存してください。");
@@ -183,6 +185,7 @@
         initialcode: headerRow.indexOf("initialcode"),
         parentid: headerRow.indexOf("parentid"),
         isfolder: headerRow.indexOf("isfolder"),
+        attribute: headerRow.indexOf("attribute"),
       };
       return rows.map(r => {
         const obj = {
@@ -194,6 +197,7 @@
           InitialCode: getCell(r, idx.initialcode),
           ParentId: getCell(r, idx.parentid),
           IsFolder: toBool(getCell(r, idx.isfolder)),
+          Attribute: getCell(r, idx.attribute),
         };
         return normalizeTaskObject(obj);
       }).filter(t => t.TaskId);
@@ -222,7 +226,8 @@
     const InitialCode = pick(t, ["InitialCode", "initialCode"]);
     const ParentId = pick(t, ["ParentId", "parentId", "parentid"]);
     const IsFolder = toBool(pick(t, ["IsFolder", "isFolder", "isfolder"]));
-    return { TaskId, Title, DescriptionHtml, HintHtml, AnswerCode, InitialCode, ParentId, IsFolder };
+    const Attribute = pick(t, ["Attribute", "attribute"]) || "";
+    return { TaskId, Title, DescriptionHtml, HintHtml, AnswerCode, InitialCode, ParentId, IsFolder, Attribute };
   }
 
   async function loadTaskList() {
@@ -435,14 +440,15 @@
               Title: "",
               DescriptionHtml: "",
               HintHtml: "",
-              AnswerCode: "",
-              InitialCode: "",
-              ParentId: item.TaskId,
-              IsFolder: false,
-            });
-            $("taskParentId").value = item.TaskId; // 親にセット
-            setActiveTask(null);
-            setStatus(`「${item.Title || item.TaskId}」配下に新規課題を作成します。`);
+        AnswerCode: "",
+        InitialCode: "",
+        ParentId: item.TaskId,
+        IsFolder: false,
+        Attribute: "",
+      });
+      $("taskParentId").value = item.TaskId; // 親にセット
+      setActiveTask(null);
+      setStatus(`「${item.Title || item.TaskId}」配下に新規課題を作成します。`);
           } else {
             // 課題クリック → 編集
             exitFolderOnlyMode();
@@ -472,6 +478,7 @@
     $("taskId").value = task.TaskId || "";
     $("taskTitle").value = task.Title || "";
     $("taskParentId").value = task.ParentId || "";
+    $("taskAttribute").value = task.Attribute || "";
 
     $("taskDesc").value = task.DescriptionHtml || task.Description || "";
     $("taskHint").value = task.HintHtml || task.Hint || "";
@@ -501,6 +508,7 @@
     if (initialEditor) initialEditor.setOption("readOnly", "nocursor");
     $("taskDesc").setAttribute("readonly", "readonly");
     $("taskHint").setAttribute("readonly", "readonly");
+    $("taskAttribute").setAttribute("disabled", "disabled");
   }
   /** フォルダ作成モード解除 */
   function exitFolderOnlyMode() {
@@ -511,6 +519,7 @@
     if (initialEditor) initialEditor.setOption("readOnly", false);
     $("taskDesc").removeAttribute("readonly");
     $("taskHint").removeAttribute("readonly");
+    $("taskAttribute").removeAttribute("disabled");
   }
 
   /** 選択中の課題を同一フォルダに複製（TaskIdはサーバ採番） */
@@ -544,6 +553,7 @@
     payload.append("InitialCode", src.InitialCode || "");
     payload.append("ParentId", src.ParentId || "");
     payload.append("IsFolder", "false");
+    payload.append("Attribute", src.Attribute || "");
 
     setStatus("コピーを作成しています…");
     try {
@@ -580,6 +590,7 @@
         InitialCode: src.InitialCode || "",
         ParentId: src.ParentId || "",
         IsFolder: false,
+        Attribute: src.Attribute || "",
       };
       const arr = tasks.slice();
       arr.push(newTask);
@@ -617,6 +628,7 @@
     const taskId = $("taskId").value.trim();
     const title = $("taskTitle").value.trim();
     const parentId = $("taskParentId").value;
+    const attribute = $("taskAttribute").value;
     const desc = $("taskDesc").value;
     const hint = $("taskHint").value;
     const ans = answerEditor ? answerEditor.getValue() : $("answerEditor").value;
@@ -643,6 +655,7 @@
     payload.append("InitialCode", initCode);
     payload.append("ParentId", parentId || "");
     payload.append("IsFolder", String(!!currentIsFolder));
+    payload.append("Attribute", attribute || "");
 
     try {
       const res = await fetch(APP_CONFIG.serverBaseUrl, {
@@ -679,6 +692,7 @@
         InitialCode: initCode,
         ParentId: parentId || "",
         IsFolder: !!currentIsFolder,
+        Attribute: attribute || "",
       };
       const arr = Array.isArray(window.__TASKS) ? window.__TASKS.slice() : [];
       const i = arr.findIndex(x => x.TaskId === newId);

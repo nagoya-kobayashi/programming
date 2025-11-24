@@ -29,6 +29,7 @@ const statusColors = {
   graded: "#ff8fb7",
   saved: "#13c2c2",
   editing: "#fa541c",
+  excluded: "#8c8c8c",
   empty: "#d9d9d9"
 };
 
@@ -48,6 +49,15 @@ const taskSubmitted = Object.create(null);
 let outputBuffer = "";
 const taskDirtyState = Object.create(null);
 const taskSyncedState = Object.create(null);
+
+function getTaskAttribute(taskId) {
+  if (!taskId) return "その他";
+  const found = tasksData.find(t => t.id === taskId);
+  return (found && found.attribute) ? found.attribute : "その他";
+}
+function isTaskExcluded(taskId) {
+  return getTaskAttribute(taskId) === "その他";
+}
 
 function isBlankCode(s) { return !s || String(s).replace(/[\s\u00A0\uFEFF]/g, "") === ""; }
 function log(...a){ console.log("[Learn]", ...a); }

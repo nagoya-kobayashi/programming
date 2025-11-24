@@ -12,6 +12,10 @@ let commentBubbleExpandTimer = null;
 let commentBubblePending = null;
 const COMMENT_EXPAND_MS = 500;
 
+function isExcludedTask(taskId) {
+  return typeof isTaskExcluded === "function" ? isTaskExcluded(taskId) : false;
+}
+
 function findTaskMeta(taskId) {
 
   if (!taskId) return null;
@@ -205,6 +209,8 @@ async function selectTask(nextTaskId) {
 
 
   const task = tasksData.find(t => t.id === nextTaskId);
+
+  const excludedTask = isExcludedTask(nextTaskId);
 
   if (!task) return;
 
@@ -484,6 +490,11 @@ async function selectTask(nextTaskId) {
 
 
   refreshEditorLockState(nextTaskId);
+  if (excludedTask) {
+    taskSubmitted[nextTaskId] = false;
+    setSubmitButtonState(false);
+    unlockEditor();
+  }
   updateStatusIcon(computeStatusKey(nextTaskId));
 
   applyResultsToList();
@@ -503,6 +514,11 @@ async function saveSpecificTask(taskId, data, silent = true) {
 
     return;
 
+  }
+  const excluded = isExcludedTask(taskId);
+  if (excluded && data && data.submitted) {
+    if (!silent) showStatusMessage('採点対象外の課題は提出できません', 'error');
+    return;
   }
 
   const payload = commPayload.createTaskSavePayload(
@@ -573,6 +589,12 @@ function saveToServer(silent = false, submittedFlag = false, targetTaskId = curr
 
     return;
 
+  }
+
+  const excludedTask = isExcludedTask(targetTaskId);
+  if (submittedFlag && excludedTask) {
+    if (!silent) showStatusMessage('採点対象外の課題は提出できません', 'error');
+    return;
   }
 
   if (!sheetIO || !commPayload) {
@@ -730,6 +752,10 @@ function persistSelectionCache(taskId, state) {
 function submitToServer() {
 
   if (!currentTaskId) return;
+  if (isExcludedTask(currentTaskId)) {
+    showStatusMessage('採点対象外の課題は提出できません', 'error');
+    return;
+  }
 
   const targetTaskId = currentTaskId;
 
@@ -889,6 +915,10 @@ function unlockEditor() {
 function refreshEditorLockState(taskId = null) {
   const targetId = taskId || currentTaskId;
   if (!targetId) return;
+  if (isExcludedTask(targetId)) {
+    unlockEditor();
+    return;
+  }
   if (taskSubmitted[targetId]) {
     lockEditor();
   } else {
@@ -902,7 +932,11 @@ function setSubmitButtonState(isSubmitted) {
 
   const submitBtn = document.getElementById('submitButton');
 
-  if (submitBtn) submitBtn.textContent = isSubmitted ? '提出取消' : '提出';
+  if (submitBtn) {
+    const excluded = isExcludedTask(currentTaskId);
+    submitBtn.textContent = isSubmitted ? '提出取消' : '提出';
+    if (excluded) submitBtn.disabled = true;
+  }
 
 }
 
@@ -946,6 +980,14 @@ function updateCommentBubble(taskId = null) {
   const message = body ? body.querySelector('.bubble-message') : null;
 
   if (!bubble || !body || !message) return;
+  if (taskId && isExcludedTask(taskId)) {
+    bubble.style.display = 'none';
+    message.innerHTML = '';
+    bubble.classList.remove('is-compact', 'is-mini', 'is-collapsed', 'is-expanding');
+    commentBubbleCollapsed = false;
+    lastCommentTaskId = null;
+    return;
+  }
 
   if (!taskId) {
 
