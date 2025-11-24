@@ -38,6 +38,11 @@
   const USER_CLASS_PREFIX = `grading.${cacheBaseKey}.userClass.`;
   const SUBMITTED_ONLY_KEY = `grading.${cacheBaseKey}.submittedOnly`;
   let submittedOnly = false;
+  const plotCache = new Map(); // key -> { signature, dataUrl?, error? }
+  const plotPromises = new Map(); // key -> { signature, promise }
+  let plotPyodide = null;
+  let plotPyodideInit = null;
+  let plotRunQueue = Promise.resolve();
 
   const cloneDeep = (obj) => (obj ? JSON.parse(JSON.stringify(obj)) : obj);
   const pendingKeyFor = (classId, taskId) => `${classId || 'default'}::${taskId || ''}`;
@@ -130,6 +135,253 @@
   submittedOnly = loadSubmittedOnlySetting();
   if (submittedOnlyToggle) {
     submittedOnlyToggle.checked = submittedOnly;
+  }
+
+  function clearPlotPreviews() {
+    plotCache.clear();
+    plotPromises.clear();
+  }
+
+  function plotCacheKey(userId, taskId) {
+    return `${userId || ''}::${taskId || ''}`;
+  }
+
+  function buildPlotSignature(submission) {
+    if (!submission) return '';
+    const savedAt = submission.savedAt || '';
+    const code = submission.code || '';
+    const output = submission.output || '';
+    return `${savedAt}::${code}::${output}`;
+  }
+
+  function enqueuePlotExecution(fn) {
+    const next = plotRunQueue.then(() => fn());
+    plotRunQueue = next.catch(() => {});
+    return next;
+  }
+
+  async function ensurePlotPyodide() {
+    if (plotPyodide) return plotPyodide;
+    if (plotPyodideInit) return plotPyodideInit;
+    plotPyodideInit = (async () => {
+      let chosenSrc = '';
+      if (typeof loadPyodide === 'undefined') {
+        const candidates = [
+          'https://cdn.jsdelivr.net/pyodide/v0.22.1/full/pyodide.js',
+          './pyodide/pyodide.js',
+          './pyodide.js'
+        ];
+        let lastErr = null;
+        for (const src of candidates) {
+          try {
+            await new Promise((resolve, reject) => {
+              const s = document.createElement('script');
+              s.src = src;
+              s.onload = resolve;
+              s.onerror = reject;
+              document.head.appendChild(s);
+            });
+            chosenSrc = src;
+            break;
+          } catch (e) {
+            lastErr = e;
+          }
+        }
+        if (typeof loadPyodide === 'undefined') {
+          throw lastErr || new Error('pyodide.js の読み込みに失敗しました');
+        }
+      }
+      let indexURL = 'https://cdn.jsdelivr.net/pyodide/v0.22.1/full/';
+      if (chosenSrc && !/^https?:/i.test(chosenSrc)) {
+        const a = document.createElement('a');
+        a.href = chosenSrc;
+        indexURL = a.href.replace(/[^/]+$/, '');
+      }
+      const py = await loadPyodide({ indexURL });
+      await py.loadPackage(['matplotlib']);
+      return py;
+    })().then(py => {
+      plotPyodide = py;
+      return py;
+    }).finally(() => {
+      plotPyodideInit = null;
+    });
+    return plotPyodideInit;
+  }
+
+  function generatePlotPreview(code) {
+    return enqueuePlotExecution(async () => {
+      const py = await ensurePlotPyodide();
+      if (!py) throw new Error('Pyodide の初期化に失敗しました');
+      const pythonCode = [
+        'import builtins, io, base64',
+        'import matplotlib',
+        'matplotlib.use("Agg", force=True)',
+        'from matplotlib import pyplot as plt',
+        'from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas',
+        'plt.ioff()',
+        '__plot_data__ = []',
+        'def __capture_plot__():',
+        '    try:',
+        '        fids = list(plt.get_fignums())',
+        '        for fid in fids:',
+        '            fig = plt.figure(fid)',
+        '            if not getattr(fig, "canvas", None):',
+        '                FigureCanvas(fig)',
+        '            try:',
+        '                fig.canvas.draw()',
+        '                buf = io.BytesIO()',
+        '                fig.savefig(buf, format="png", bbox_inches="tight")',
+        '                buf.seek(0)',
+        '                b64 = base64.b64encode(buf.getvalue()).decode("ascii")',
+        '                __plot_data__.append("data:image/png;base64," + b64)',
+        '            finally:',
+        '                plt.close(fig)',
+        '    except Exception:',
+        '        pass',
+        'def __plt_show_patch__(*args, **kwargs):',
+        '    __capture_plot__()',
+        'try:',
+        '    plt.show = __plt_show_patch__',
+        'except Exception:',
+        '    pass',
+        'def __safe_input__(*args, **kwargs):',
+        '    return ""',
+        'try:',
+        '    builtins.input = __safe_input__',
+        '    __builtins__["input"] = __safe_input__',
+        'except Exception:',
+        '    pass',
+        'try:',
+        '    import time',
+        '    time.sleep = lambda *args, **kwargs: None',
+        'except Exception:',
+        '    pass',
+        '__ns = {}',
+        `code_to_run = ${JSON.stringify(String(code || ''))}`,
+        'exec(compile(code_to_run, "<student>", "exec"), __ns, __ns)',
+        '__capture_plot__()',
+        'try:',
+        '    plt.close("all")',
+        'except Exception:',
+        '    pass'
+      ].join('\n');
+      await py.runPythonAsync(pythonCode);
+      const pyList = py.globals.get('__plot_data__');
+      let urls = [];
+      try {
+        urls = pyList && pyList.toJs ? pyList.toJs() : [];
+      } finally {
+        try { if (pyList && pyList.destroy) pyList.destroy(); } catch {}
+        try { py.runPython('del __plot_data__'); } catch {}
+      }
+      if (urls && urls.length) return urls[0];
+      throw new Error('グラフを取得できませんでした');
+    });
+  }
+
+  function plotNoteText(outputText) {
+    const base = (outputText && String(outputText).trim()) || '[plot]';
+    return `提出出力: ${base}`;
+  }
+
+  function applyPlotLoading(outputBlock, outputText) {
+    if (!outputBlock) return;
+    outputBlock.classList.add('plot-output');
+    outputBlock.innerHTML = '';
+    const note = document.createElement('div');
+    note.className = 'plot-note';
+    note.textContent = plotNoteText(outputText);
+    const status = document.createElement('div');
+    status.className = 'plot-status';
+    status.textContent = 'グラフを生成しています...';
+    outputBlock.append(note, status);
+  }
+
+  function applyPlotImage(outputBlock, dataUrl, outputText) {
+    if (!outputBlock) return;
+    outputBlock.classList.add('plot-output');
+    outputBlock.innerHTML = '';
+    const note = document.createElement('div');
+    note.className = 'plot-note';
+    note.textContent = plotNoteText(outputText);
+    const img = document.createElement('img');
+    img.className = 'plot-preview';
+    img.src = dataUrl;
+    img.alt = '提出コードのグラフ';
+    outputBlock.append(note, img);
+  }
+
+  function applyPlotError(outputBlock, message, outputText) {
+    if (!outputBlock) return;
+    outputBlock.classList.add('plot-output');
+    outputBlock.innerHTML = '';
+    const note = document.createElement('div');
+    note.className = 'plot-note';
+    note.textContent = plotNoteText(outputText);
+    const status = document.createElement('div');
+    status.className = 'plot-status error';
+    status.textContent = message || 'グラフ生成に失敗しました';
+    outputBlock.append(note, status);
+  }
+
+  function renderPlotPreview(userId, taskId, submission, outputBlock) {
+    const outputText = submission?.output;
+    applyPlotLoading(outputBlock, outputText);
+    if (!submission || !submission.code) {
+      applyPlotError(outputBlock, '提出コードが空のためグラフを生成できませんでした', outputText);
+      return;
+    }
+    const key = plotCacheKey(userId, taskId);
+    const signature = buildPlotSignature(submission);
+    const cached = plotCache.get(key);
+    if (cached && cached.signature === signature) {
+      if (cached.dataUrl) {
+        applyPlotImage(outputBlock, cached.dataUrl, outputText);
+        return;
+      }
+      if (cached.error) {
+        applyPlotError(outputBlock, cached.error, outputText);
+        return;
+      }
+    } else if (cached && cached.signature !== signature) {
+      plotCache.delete(key);
+    }
+    const inflight = plotPromises.get(key);
+    if (inflight && inflight.signature === signature) {
+      inflight.promise
+        .then(url => {
+          if (outputBlock.isConnected) applyPlotImage(outputBlock, url, outputText);
+        })
+        .catch(err => {
+          if (outputBlock.isConnected) applyPlotError(outputBlock, err.message || String(err), outputText);
+        });
+      return;
+    } else if (inflight && inflight.signature !== signature) {
+      plotPromises.delete(key);
+    }
+    const promise = generatePlotPreview(submission.code)
+      .then(url => {
+        plotCache.set(key, { signature, dataUrl: url });
+        return url;
+      })
+      .catch(err => {
+        const msg = err && err.message ? err.message : 'グラフ生成に失敗しました';
+        plotCache.set(key, { signature, error: msg });
+        throw new Error(msg);
+      })
+      .finally(() => {
+        const current = plotPromises.get(key);
+        if (current && current.signature === signature) plotPromises.delete(key);
+      });
+    plotPromises.set(key, { signature, promise });
+    promise
+      .then(url => {
+        if (outputBlock.isConnected) applyPlotImage(outputBlock, url, outputText);
+      })
+      .catch(err => {
+        if (outputBlock.isConnected) applyPlotError(outputBlock, err.message || String(err), outputText);
+      });
   }
 
   function mergeSubmissionSets(base = {}, incoming = {}) {
@@ -233,6 +485,7 @@
   }
 
   function resetStateForLoading(classId) {
+    clearPlotPreviews();
     state.classId = classId || state.classId || '';
     state.tasks = [];
     state.roots = [];
@@ -265,7 +518,10 @@
     const prevClassId = state.classId;
     state.classId = data.classId || state.classId || '';
     if (prevClassId && prevClassId !== state.classId) {
+      clearPlotPreviews();
       state.pendingSaves = Object.create(null);
+    } else if (!prevClassId && state.classId) {
+      clearPlotPreviews();
     }
     state.tasks = Array.isArray(data.tasks) ? data.tasks : [];
     state.roots = buildTaskTree(state.tasks);
@@ -356,6 +612,12 @@
   function toBool(value) {
     const s = String(value || '').trim().toLowerCase();
     return s === 'true' || s === '1' || s === 'yes' || s === 'y';
+  }
+
+  function isPlotOutput(outputText) {
+    if (!outputText) return false;
+    const text = String(outputText).toLowerCase();
+    return text.includes('[plot]');
   }
 
   function buildTaskTree(tasks) {
@@ -593,9 +855,14 @@
       codeBlock.className = 'code-block';
       codeBlock.textContent = submission?.code || '---';
 
-      const outputBlock = document.createElement('pre');
+      const hasPlotOutput = isPlotOutput(submission?.output);
+      const outputBlock = document.createElement(hasPlotOutput ? 'div' : 'pre');
       outputBlock.className = 'output-block';
-      outputBlock.textContent = submission?.output || '---';
+      if (hasPlotOutput) {
+        renderPlotPreview(student.userId, currentTaskId, submission, outputBlock);
+      } else {
+        outputBlock.textContent = submission?.output || '---';
+      }
 
       const evaluation = document.createElement('div');
       evaluation.className = 'evaluation-area';

@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <title>クラス別集計 | プログラミング学習</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="summary.css" />
+  <script src="config.js"></script>
+  <script defer src="summary.js"></script>
+</head>
+<body>
+  <div class="summary-page">
+    <header class="hero">
+      <div class="hero-text">
+        <p class="eyebrow">課題進捗サマリ</p>
+        <h1>クラス別の提出・採点状況</h1>
+        <p class="lede">
+          スプレッドシートにあらかじめ集計済みのシートを作成し、課題ごとの件数を高速に横断表示します。
+          各クラスの「クリア済 / 採点済 / 提出済 / 未提出」を一覧で確認できます。
+        </p>
+        <div class="meta-line">
+          <span id="generatedAt" class="meta-pill">更新日時: --</span>
+          <span id="dataSource" class="meta-pill muted">ソース: --</span>
+          <span class="meta-pill subtle">シート名: submission_summary</span>
+        </div>
+      </div>
+      <div class="hero-actions">
+        <button id="reloadButton" type="button" class="ghost">集計シートを読み込む</button>
+        <button id="rebuildButton" type="button" class="primary">再集計して更新</button>
+      </div>
+    </header>
+
+    <div id="statusMessage" class="status-line"></div>
+
+    <section class="panel">
+      <div class="panel-head">
+        <div class="filter-group">
+          <label for="taskFilter" class="filter-label">課題フィルタ</label>
+          <input id="taskFilter" type="search" placeholder="タイトル・フォルダパス・TaskId で検索" />
+        </div>
+        <div class="filter-group inline">
+          <span class="filter-label">クラス列の表示</span>
+          <div id="classToggles" class="class-toggles"></div>
+        </div>
+        <div class="view-toggle">
+          <label class="filter-label">表示形式</label>
+          <button id="displayModeButton" type="button" class="ghost small">件数表示</button>
+        </div>
+      </div>
+      <div class="table-wrap" id="tableWrap">
+        <table id="summaryTable" class="summary-table"></table>
+      </div>
+      <div class="scroll-rail" id="scrollRail">
+        <div class="scroll-rail-inner" id="scrollRailInner">
+          <div class="scroll-rail-spacer" id="scrollRailSpacer"></div>
+        </div>
+      </div>
+      <p class="hint">
+        集計シートは「再集計して更新」ボタンで再生成されます。普段は「集計シートを読み込む」で既存のシートを参照してください。
+      </p>
+    </section>
+  </div>
+</body>
+</html>

@@ -250,6 +250,35 @@ button:not(:disabled):hover {
   word-break: break-all;
 }
 
+.output-block.plot-output {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  white-space: normal;
+  max-height: none;
+  overflow: visible;
+}
+.output-block.plot-output .plot-note {
+  align-self: flex-start;
+  font-size: 0.85rem;
+  color: #555;
+}
+.output-block.plot-output .plot-status {
+  font-size: 0.9rem;
+  color: #555;
+}
+.output-block.plot-output .plot-status.error {
+  color: #c93636;
+}
+.output-block.plot-output img.plot-preview {
+  width: 50%;
+  max-width: 420px;
+  height: auto;
+  border-radius: 6px;
+  box-shadow: 0 3px 12px rgba(0,0,0,0.08);
+}
+
 .evaluation-area {
   display: flex;
   flex-direction: column;
