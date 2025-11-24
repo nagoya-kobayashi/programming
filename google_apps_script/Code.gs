@@ -16,6 +16,7 @@ const SPREADSHEET_ID = '<<1ZCYBcG9jqGHUzu0oUnWyY41wNhTZlug4oEIB4f3tWvo>>'; // �
 const TIMEZONE = 'Asia/Tokyo';
 const SESSION_TTL_MINUTES = 0;
 const SUBMISSION_SUMMARY_SHEET = 'submission_summary';
+const TASK_ATTRIBUTE_LABELS = ['基礎', '演習', '発展', 'その他'];
 
 /* ===================== Entry Points ===================== */
 
@@ -377,12 +378,123 @@ function logout_(e) {
 
 /* ===================== Task (課題) ===================== */
 
-function getTasks_(e) {
+function normalizeTaskAttributeValue_(raw) {
+  const s = String(raw || '').replace(/\s+/g, '').trim();
+  if (!s) return '';
+  const hit = TASK_ATTRIBUTE_LABELS.find(label => label === s);
+  return hit || '';
+}
+
+function guessAttributeFromFolderName_(name) {
+  const s = String(name || '').trim().toLowerCase();
+  if (!s) return '';
+  if (s.includes('基礎') || /^\(?\s*1/.test(s)) return '基礎';
+  if (s.includes('演習') || /^\(?\s*2/.test(s)) return '演習';
+  if (s.includes('発展') || /^\(?\s*3/.test(s)) return '発展';
+  if (s.includes('その他')) return 'その他';
+  return '';
+}
+
+function deriveAttributeFromPath_(taskId, pathMap) {
+  const path = pathMap && pathMap[String(taskId)] ? String(pathMap[String(taskId)]) : '';
+  if (!path) return 'その他';
+  const parts = path.split(' / ').filter(Boolean);
+  const second = parts.length >= 2 ? parts[1] : (parts[0] || '');
+  const guessed = guessAttributeFromFolderName_(second);
+  return guessed || 'その他';
+}
+
+function ensureTaskHeader_(sh) {
+  if (!sh) return {};
+  if (sh.getLastRow() === 0) {
+    sh.appendRow(['TaskId','ParentId','IsFolder','Title','Attribute','DescriptionHtml','HintHtml','AnswerCode','InitialCode']);
+  } else {
+    const lastCol = sh.getLastColumn();
+    const headerValues = sh.getRange(1, 1, 1, lastCol).getValues()[0] || [];
+    const headerMap = findHeaderMap_(headerValues);
+    if (headerMap['attribute'] == null) {
+      sh.getRange(1, lastCol + 1).setValue('Attribute');
+    }
+  }
+  const refreshed = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0] || [];
+  return findHeaderMap_(refreshed);
+}
+
+function buildTaskRecords_(values, header) {
+  const tidCol = header['taskid'];
+  const pidCol = header['parentid'];
+  const ttlCol = header['title'];
+  const isfCol = header['isfolder'];
+  const records = [];
+  for (let r = 1; r < values.length; r++) {
+    const row = values[r];
+    const taskId = tidCol != null ? String(row[tidCol] || '') : '';
+    if (!taskId) continue;
+    records.push({
+      taskId,
+      parentId: pidCol != null ? String(row[pidCol] || '') : '',
+      title: ttlCol != null ? String(row[ttlCol] || '') : taskId,
+      isFolder: isfCol != null ? toBool_(row[isfCol]) : false
+    });
+  }
+  return records;
+}
+
+function ensureTaskAttributes_(sh, values, header) {
+  if (!values || values.length < 1) return values;
+  const attrCol = header['attribute'];
+  const tidCol = header['taskid'];
+  const isfCol = header['isfolder'];
+  if (attrCol == null || tidCol == null) return values;
+
+  const records = buildTaskRecords_(values, header);
+  const pathMap = buildTaskPathMap_(records);
+  const colValues = [];
+  let changed = false;
+
+  for (let r = 1; r < values.length; r++) {
+    const row = values[r];
+    const taskId = String(row[tidCol] || '');
+    const isFolder = isfCol != null ? toBool_(row[isfCol]) : false;
+    const explicit = normalizeTaskAttributeValue_(row[attrCol]);
+    let resolved = explicit;
+    if (!resolved && !isFolder) {
+      resolved = deriveAttributeFromPath_(taskId, pathMap);
+    } else if (!resolved && isFolder) {
+      resolved = '';
+    }
+    if (!resolved && !isFolder) resolved = 'その他';
+    const next = resolved || '';
+    if (next !== String(row[attrCol] || '')) {
+      values[r][attrCol] = next;
+      changed = true;
+    }
+    colValues.push([values[r][attrCol] || '']);
+  }
+
+  if (changed) {
+    sh.getRange(2, attrCol + 1, colValues.length, 1).setValues(colValues);
+  }
+  return values;
+}
+
+function loadTaskSheetWithAttributes_() {
   const ss = openSs_();
   const sh = ss.getSheetByName('task');
+  if (!sh) return { sheet: null, header: {}, values: [] };
+  const header = ensureTaskHeader_(sh);
+  let values = sh.getDataRange().getValues();
+  if (values.length > 0) {
+    values = ensureTaskAttributes_(sh, values, header);
+  }
+  const refreshedHeader = values.length ? findHeaderMap_(values[0]) : header;
+  return { sheet: sh, header: refreshedHeader, values };
+}
+
+function getTasks_(e) {
+  const { sheet: sh, values } = loadTaskSheetWithAttributes_();
   if (!sh) return json_({ status: 'error', message: 'task シートがありません' });
-  const values = sh.getDataRange().getValues();
-  if (values.length < 1) return json_({ status: 'ok', tasks: [] });
+  if (!values || values.length < 1) return json_({ status: 'ok', tasks: [] });
   // そのまま返す（ヘッダ + 行）…クライアントでヘッダを用いて列名参照
   return json_({ status: 'ok', tasks: values });
 }
@@ -405,28 +517,23 @@ function saveTask_(e) {
   const hintHtml = body.HintHtml || '';
   const answerCode = body.AnswerCode || '';
   const initialCode = body.InitialCode || '';
+  const { sheet: sh, header, values } = loadTaskSheetWithAttributes_();
+  if (!sh) return json_({ status: 'error', message: 'task シートがありません' });
 
-  const ss = openSs_();
-  let sh = ss.getSheetByName('task');
-  if (!sh) sh = ss.insertSheet('task');
-  if (sh.getLastRow() === 0) {
-    sh.appendRow(['TaskId','ParentId','IsFolder','Title','DescriptionHtml','HintHtml','AnswerCode','InitialCode']);
-  }
-  const rng = sh.getDataRange().getValues();
-  const header = findHeaderMap_(rng[0]);
   const tidCol = header['taskid'];
   const pidCol = header['parentid'];
   const isfCol = header['isfolder'];
   const ttlCol = header['title'];
+  const attrCol = header['attribute'];
   const descCol= header['descriptionhtml'];
   const hintCol= header['hinthtml'];
   const ansCol = header['answercode'];
   const initCol= header['initialcode'];
 
   let rowIdx = -1;
-  if (taskId) {
-    for (let r = 1; r < rng.length; r++) {
-      if (String(rng[r][tidCol]) === String(taskId)) {
+  if (taskId && values && values.length) {
+    for (let r = 1; r < values.length; r++) {
+      if (String(values[r][tidCol]) === String(taskId)) {
         rowIdx = r + 1; break;
       }
     }
@@ -436,14 +543,41 @@ function saveTask_(e) {
     newTaskId = 'T' + Utilities.getUuid().slice(0,8);
   }
 
+  const recordsForPath = buildTaskRecords_(values || [], header);
+  const explicitAttr = normalizeTaskAttributeValue_(body.Attribute || body.attribute || '');
+  const pendingRecord = {
+    taskId: newTaskId,
+    parentId: parentId,
+    title: title || newTaskId,
+    isFolder: isFolder
+  };
+  const existingIdx = recordsForPath.findIndex(r => r.taskId === pendingRecord.taskId);
+  if (existingIdx >= 0) recordsForPath[existingIdx] = pendingRecord; else recordsForPath.push(pendingRecord);
+  const pathMap = buildTaskPathMap_(recordsForPath);
+  let resolvedAttr = explicitAttr;
+  if (!resolvedAttr && !isFolder) resolvedAttr = deriveAttributeFromPath_(pendingRecord.taskId, pathMap);
+  if (!resolvedAttr && !isFolder) resolvedAttr = 'その他';
+  if (isFolder && !resolvedAttr) resolvedAttr = '';
+
   if (rowIdx < 0) {
-    sh.appendRow([ newTaskId, parentId, isFolder, title, descriptionHtml, hintHtml, answerCode, initialCode ]);
+    const row = [];
+    row[tidCol] = newTaskId;
+    row[pidCol] = parentId;
+    row[isfCol] = isFolder;
+    row[ttlCol] = title;
+    if (attrCol != null) row[attrCol] = resolvedAttr;
+    row[descCol] = descriptionHtml;
+    row[hintCol] = hintHtml;
+    row[ansCol] = answerCode;
+    row[initCol]= initialCode;
+    sh.appendRow(row);
   } else {
     const row = rowIdx;
-    sh.getRange(row, tidCol + 1).setValue(taskId);
+    sh.getRange(row, tidCol + 1).setValue(newTaskId);
     sh.getRange(row, pidCol + 1).setValue(parentId);
     sh.getRange(row, isfCol + 1).setValue(isFolder);
     sh.getRange(row, ttlCol + 1).setValue(title);
+    if (attrCol != null) sh.getRange(row, attrCol + 1).setValue(resolvedAttr);
     sh.getRange(row, descCol + 1).setValue(descriptionHtml);
     sh.getRange(row, hintCol + 1).setValue(hintHtml);
     sh.getRange(row, ansCol + 1).setValue(answerCode);
@@ -622,7 +756,12 @@ function getUserSnapshot_(e) {
   // tasks（既存 getTasks_ と同等の形式：ヘッダ行＋明細行）
   const taskSh = ss.getSheetByName('task');
   if (!taskSh) throw new Error('task sheet not found');
-  const tasks = taskSh.getDataRange().getValues();
+  ensureTaskHeader_(taskSh);
+  let tasks = taskSh.getDataRange().getValues();
+  if (tasks && tasks.length > 0) {
+    const header = findHeaderMap_(tasks[0]);
+    tasks = ensureTaskAttributes_(taskSh, tasks, header);
+  }
 
   // states（ユーザー個別シート <UserID>）
   const states = readUserTaskStates_(sess.userId, '');
@@ -770,21 +909,40 @@ function getClassSubmissions_(e) {
   });
 
   const submissions = {};
+  const { values: taskValues, header: taskHeader } = loadTaskSheetWithAttributes_();
+  const filteredTasks = taskValues && taskValues.length ? [taskValues[0]] : [];
+  const allowedTaskIds = new Set();
+  if (taskValues && taskValues.length > 1) {
+    const tidCol = taskHeader['taskid'];
+    const isfCol = taskHeader['isfolder'];
+    const attrCol = taskHeader['attribute'];
+    for (let r = 1; r < taskValues.length; r++) {
+      const row = taskValues[r];
+      const isFolder = isfCol != null ? toBool_(row[isfCol]) : false;
+      const attr = attrCol != null ? normalizeTaskAttributeValue_(row[attrCol]) : '';
+      if (!isFolder && attr === 'その他') continue;
+      filteredTasks.push(row);
+      if (!isFolder && tidCol != null) {
+        const tid = String(row[tidCol] || '');
+        if (tid) allowedTaskIds.add(tid);
+      }
+    }
+  }
+  const filterStates = (states) => {
+    if (!allowedTaskIds.size) return states;
+    const result = {};
+    Object.entries(states || {}).forEach(([tid, payload]) => {
+      if (allowedTaskIds.has(String(tid))) result[tid] = payload;
+    });
+    return result;
+  };
   students.forEach(stu => {
     const userStates = readUserTaskStates_(stu.userId, lastLoadedAt);
-    if (!lastLoadedAt || Object.keys(userStates).length > 0) {
-      submissions[stu.userId] = userStates;
+    const trimmed = filterStates(userStates);
+    if (!lastLoadedAt || Object.keys(trimmed).length > 0) {
+      submissions[stu.userId] = trimmed;
     }
   });
-
-  let tasks = [];
-  try {
-    const ss = openSs_();
-    const taskSh = ss.getSheetByName('task');
-    tasks = taskSh ? taskSh.getDataRange().getValues() : [];
-  } catch (_) {
-    tasks = [];
-  }
 
   const fetchedAt = fmtDate_(new Date());
 
@@ -794,7 +952,7 @@ function getClassSubmissions_(e) {
     resolvedUserId,
     fetchedAt,
     students,
-    tasks,
+    tasks: filteredTasks,
     submissions
   });
 }
@@ -868,16 +1026,13 @@ function saveScores_(e) {
 /* ===================== 集計シート生成・取得 ===================== */
 
 function loadTasksForSummary_() {
-  const ss = openSs_();
-  const sh = ss.getSheetByName('task');
-  if (!sh) return { tasks: [], pathMap: {} };
-  const values = sh.getDataRange().getValues();
+  const { values, header } = loadTaskSheetWithAttributes_();
   if (!values || values.length < 2) return { tasks: [], pathMap: {} };
-  const header = findHeaderMap_(values[0]);
   const tidCol = header['taskid'];
   const ttlCol = header['title'];
   const pidCol = header['parentid'];
   const isfCol = header['isfolder'];
+  const attrCol= header['attribute'];
   const tasks = [];
   for (let r = 1; r < values.length; r++) {
     const row = values[r];
@@ -886,7 +1041,8 @@ function loadTasksForSummary_() {
     const title = ttlCol != null ? String(row[ttlCol] || '') : taskId;
     const parentId = pidCol != null ? String(row[pidCol] || '') : '';
     const isFolder = isfCol != null ? toBool_(row[isfCol]) : false;
-    tasks.push({ taskId, title, parentId, isFolder });
+    const attribute = attrCol != null ? normalizeTaskAttributeValue_(row[attrCol]) : '';
+    tasks.push({ taskId, title, parentId, isFolder, attribute });
   }
   const pathMap = buildTaskPathMap_(tasks);
   return { tasks, pathMap };
@@ -963,7 +1119,7 @@ function ensureCountBucket_(counts, classId, bucket) {
 
 function recomputeSubmissionSummary_() {
   const { tasks, pathMap } = loadTasksForSummary_();
-  const leafTasks = tasks.filter(t => !t.isFolder);
+  const leafTasks = tasks.filter(t => !t.isFolder && t.attribute !== 'その他');
   const students = listStudents_();
   const classSet = new Set();
   students.forEach(s => { if (s && s.classId) classSet.add(String(s.classId)); });
@@ -977,6 +1133,7 @@ function recomputeSubmissionSummary_() {
       path: pathMap[t.taskId] || t.title || t.taskId,
       parentId: t.parentId || '',
       isFolder: !!t.isFolder,
+      attribute: t.attribute || '',
       counts: {}
     });
   });
@@ -1000,10 +1157,16 @@ function recomputeSubmissionSummary_() {
     });
   });
 
-  const generatedAt = fmtDate_(new Date());
-  writeSubmissionSummarySheet_(classes, summaryMap, generatedAt);
+  const filteredSummaryMap = new Map();
+  summaryMap.forEach((entry, key) => {
+    if (!entry.isFolder && entry.attribute === 'その他') return;
+    filteredSummaryMap.set(key, entry);
+  });
 
-  const rows = Array.from(summaryMap.values()).sort((a, b) => {
+  const generatedAt = fmtDate_(new Date());
+  writeSubmissionSummarySheet_(classes, filteredSummaryMap, generatedAt);
+
+  const rows = Array.from(filteredSummaryMap.values()).sort((a, b) => {
     const ap = a.path || '';
     const bp = b.path || '';
     const cmp = ap.localeCompare(bp, 'ja');
@@ -1016,12 +1179,15 @@ function recomputeSubmissionSummary_() {
     generatedAt,
     classes,
     rows,
-    tasks: tasks.map(t => ({
+    tasks: tasks
+      .filter(t => t.isFolder || t.attribute !== 'その他')
+      .map(t => ({
       taskId: t.taskId,
       title: t.title || t.taskId,
       parentId: t.parentId || '',
       isFolder: !!t.isFolder,
-      path: pathMap[t.taskId] || t.title || t.taskId
+      path: pathMap[t.taskId] || t.title || t.taskId,
+      attribute: t.attribute || deriveAttributeFromPath_(t.taskId, pathMap)
     }))
   };
 }
@@ -1087,6 +1253,10 @@ function readSubmissionSummarySheet_() {
       isFolder: toBool_(row[4]),
       counts: {}
     };
+    const parts = (entry.path || '').split(' / ').filter(Boolean);
+    const second = parts.length >= 2 ? parts[1] : (parts[0] || '');
+    entry.attribute = guessAttributeFromFolderName_(second) || 'その他';
+    if (!entry.isFolder && entry.attribute === 'その他') continue;
     classCols.forEach(col => {
       const base = col.base;
       entry.counts[col.classId] = {
@@ -1105,7 +1275,8 @@ function readSubmissionSummarySheet_() {
     title: r.title,
     parentId: r.parentId,
     isFolder: r.isFolder,
-    path: r.path
+    path: r.path,
+    attribute: r.attribute || 'その他'
   }));
   return {
     generatedAt,
