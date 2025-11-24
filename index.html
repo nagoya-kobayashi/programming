@@ -31,6 +31,17 @@
     .task-state-summary .state-list li { list-style: none; padding: 2px 0; color: #333; font-size: 0.95em; word-break: break-all; }
     .task-state-summary .state-empty { color: #777; font-size: 0.9em; margin-left: 0; }
     .task-state-summary .state-caption { font-weight: 700; color: #444; margin-bottom: 4px; }
+    .attr-progress { margin-top: 6px; padding: 6px 4px 4px; border-top: 1px dashed #e0e0e0; display: flex; flex-direction: column; gap: 6px; }
+    .attr-progress-caption { font-weight: 700; color: #333; }
+    .attr-progress-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .attr-progress-label { min-width: 110px; font-weight: 600; color: #444; }
+    .attr-progress-stars { display: flex; gap: 3px; flex-wrap: wrap; align-items: center; }
+    .attr-star { font-size: 1.05rem; line-height: 1.2; }
+    .attr-star.filled.basic { color: #52c41a; }
+    .attr-star.filled.exercise { color: #1890ff; }
+    .attr-star.filled.advanced { color: #ff4d4f; }
+    .attr-star.empty { color: #d9d9d9; }
+    .attr-progress-none { color: #999; font-size: 0.9rem; }
   </style>
   <style>
     /* 事前プリロード中の簡易インジケータ */
@@ -178,6 +189,11 @@
     submitted: '#9254de',
     pending: '#d9d9d9'
   };
+  const ATTR_PROGRESS_META = [
+    { key: '基礎', className: 'basic' },
+    { key: '演習', className: 'exercise' },
+    { key: '発展', className: 'advanced' }
+  ];
   const BASE_KEY = (suffix) => {
     const base = (typeof (window.APP_CONFIG || {}).serverBaseUrl === 'string' && (window.APP_CONFIG || {}).serverBaseUrl) || 'default';
     return `learn.${suffix}.${base}`;
@@ -271,6 +287,65 @@
     });
     return grouped;
   }
+  function isClearedState(state) {
+    if (!state) return false;
+    const scoreRaw = state.score;
+    if (scoreRaw === undefined || scoreRaw === null || String(scoreRaw).trim() === '') return false;
+    const numeric = Number(scoreRaw);
+    return !Number.isNaN(numeric) && numeric === 100;
+  }
+  function calcAttributeProgress(tasks, states) {
+    const buckets = Object.create(null);
+    ATTR_PROGRESS_META.forEach(meta => { buckets[meta.key] = { total: 0, cleared: 0, className: meta.className }; });
+    const stateMap = states || {};
+    tasks.forEach(t => {
+      const attr = normalizeAttribute(t.attribute);
+      if (!attr || attr === 'その他' || t.isFolder) return;
+      if (!buckets[attr]) return;
+      buckets[attr].total += 1;
+      const state = stateMap[t.id] || stateMap[String(t.id)];
+      if (isClearedState(state)) buckets[attr].cleared += 1;
+    });
+    return ATTR_PROGRESS_META.map(meta => ({ label: meta.key, className: meta.className, ...buckets[meta.key] }));
+  }
+  function renderAttributeProgress(container, tasks, states) {
+    const progress = calcAttributeProgress(tasks, states);
+    if (!progress.some(p => p.total > 0)) return;
+    const wrap = document.createElement('div');
+    wrap.className = 'attr-progress';
+    const caption = document.createElement('div');
+    caption.className = 'attr-progress-caption';
+    caption.textContent = '属性別クリア率';
+    wrap.appendChild(caption);
+    progress.forEach(p => {
+      const row = document.createElement('div');
+      row.className = 'attr-progress-row';
+      const label = document.createElement('span');
+      label.className = 'attr-progress-label';
+      label.textContent = `${p.label} (${p.cleared}/${p.total})`;
+      const stars = document.createElement('div');
+      stars.className = 'attr-progress-stars';
+      if (p.total === 0) {
+        const none = document.createElement('span');
+        none.className = 'attr-progress-none';
+        none.textContent = '課題なし';
+        stars.appendChild(none);
+      } else {
+        const makeStar = (filled) => {
+          const el = document.createElement('span');
+          el.className = `attr-star ${filled ? 'filled' : 'empty'}${filled ? ' ' + p.className : ''}`;
+          el.textContent = filled ? '★' : '☆';
+          return el;
+        };
+        for (let i = 0; i < p.cleared; i++) stars.appendChild(makeStar(true));
+        for (let i = p.cleared; i < p.total; i++) stars.appendChild(makeStar(false));
+      }
+      row.appendChild(label);
+      row.appendChild(stars);
+      wrap.appendChild(row);
+    });
+    container.appendChild(wrap);
+  }
   function startFromTask(taskId) {
     try { localStorage.setItem(SELECTED_KEY(), String(taskId || '')); } catch (e) { console.warn('[index] failed to store selected task', e); }
     try {
@@ -315,6 +390,8 @@
     caption.className = 'state-caption';
     caption.textContent = '課題の状態';
     container.appendChild(caption);
+
+    renderAttributeProgress(container, tasks, snapshot.states || {});
 
     STATE_GROUPS.forEach(group => {
       const wrap = document.createElement('div');

@@ -865,18 +865,27 @@ function updateStatusIcon(status) {
   const color = statusColors[key] || statusColors.empty;
   const perfect = (typeof isPerfectScore === "function") ? isPerfectScore(currentTaskId) : false;
   if (perfect) {
-    icon.textContent = "★";
-    icon.classList.add("sparkle-star");
-    icon.classList.remove("dot-icon");
-    icon.style.background = "transparent";
-    icon.style.color = "";
+    const meta = tasksData.find(t => t.id === currentTaskId) || {};
+    if (typeof setStarIcon === "function") {
+      setStarIcon(icon, meta.attribute || getTaskAttribute(currentTaskId));
+    } else {
+      icon.textContent = "★";
+      icon.classList.add("sparkle-star");
+      icon.classList.remove("dot-icon");
+      icon.style.background = "transparent";
+      icon.style.color = "";
+    }
     return;
   }
-  icon.classList.remove("sparkle-star");
-  icon.classList.add("dot-icon");
-  icon.textContent = "●";
-  icon.style.background = "transparent";
-  icon.style.color = color;
+  if (typeof setDotIcon === "function") {
+    setDotIcon(icon, color);
+  } else {
+    icon.classList.remove("sparkle-star");
+    icon.classList.add("dot-icon");
+    icon.textContent = "●";
+    icon.style.background = "transparent";
+    icon.style.color = color;
+  }
 
 }
 

@@ -167,6 +167,40 @@ function buildTaskPathMapForClient(tasks) {
   return cache;
 }
 
+const STAR_ATTRIBUTE_CLASSES = ["star-basic", "star-exercise", "star-advanced", "star-default"];
+function starClassForAttribute(attr) {
+  switch (attr) {
+    case "基礎": return "star-basic";
+    case "演習": return "star-exercise";
+    case "発展": return "star-advanced";
+    default: return "star-default";
+  }
+}
+function applyStarColorClass(el, attr) {
+  if (!el) return;
+  STAR_ATTRIBUTE_CLASSES.forEach(cls => el.classList.remove(cls));
+  const cls = starClassForAttribute(attr);
+  if (cls) el.classList.add(cls);
+}
+function setStarIcon(el, attr) {
+  if (!el) return;
+  el.textContent = "★";
+  el.classList.add("sparkle-star");
+  el.classList.remove("dot-icon");
+  applyStarColorClass(el, attr);
+  el.style.background = "transparent";
+  el.style.color = "";
+}
+function setDotIcon(el, color) {
+  if (!el) return;
+  el.textContent = "●";
+  el.classList.remove("sparkle-star");
+  el.classList.add("dot-icon");
+  STAR_ATTRIBUTE_CLASSES.forEach(cls => el.classList.remove(cls));
+  el.style.background = "transparent";
+  el.style.color = color;
+}
+
 function renderTaskTree() {
   const ul = document.getElementById("tasks");
   while (ul.firstChild) ul.removeChild(ul.firstChild);
@@ -415,19 +449,12 @@ function applyResultsToList() {
     if (meta && meta.isFolder) return;
     const status = computeStatusKey(taskId);
     const perfect = isPerfectScore(taskId);
+    const attr = meta ? meta.attribute : getTaskAttribute(taskId);
     const color = statusColors[status] || statusColors.empty;
     if (perfect) {
-      icon.textContent = "★";
-      icon.classList.add("sparkle-star");
-      icon.classList.remove("dot-icon");
-      icon.style.background = "transparent";
-      icon.style.color = "";
+      setStarIcon(icon, attr);
     } else {
-      icon.textContent = "●";
-      icon.classList.remove("sparkle-star");
-      icon.classList.add("dot-icon");
-      icon.style.background = "transparent";
-      icon.style.color = color;
+      setDotIcon(icon, color);
     }
   });
   if (typeof updateCommentBubble === "function" && typeof currentTaskId !== "undefined") {
@@ -501,7 +528,7 @@ function updateFolderCompletionIndicators() {
       const allCleared = counts.total > 0 && counts.cleared === counts.total;
       if (allCleared) {
         icon.className = "folder-icon-slot task-icon sparkle-star folder-star";
-        icon.textContent = "★";
+        setStarIcon(icon, getTaskAttribute(folderId));
       } else {
         icon.className = "folder-icon-slot icon-ph";
         icon.textContent = "";
