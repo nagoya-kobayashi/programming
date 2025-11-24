@@ -1,4 +1,4 @@
-﻿# データフロー図・通信仕様
+# データフロー図・通信仕様
 
 本書では、クライアントと Google Apps Script (GAS)、Pyodide ワーカー間でデータがどのように流れるかを時系列で説明します。ASCII 形式のシーケンス図とフロー図を用いて通信仕様を明確にします。
 
@@ -6,7 +6,7 @@
 トップ画面はセッション確認と課題プリロードを担当します。
 1. ページ読み込み – index.html は localStorage.sessionId と URL の sid パラメータを読み出します。両者が一致しない場合はログインを要求します。
 2. セッション検証 – fetch(serverBaseUrl, {method:'POST', body:'action=ping&session=<id>'}) を送信しますが、GAS 側に ping ハンドラが無いため saveUserCode_ にフォールバックし、missing taskId エラーが返されます。フロントは catch で {status:'ok'} と扱います。
-3. �ۑ�Ɛi���̐�ǂ� ? startPreload() �� POST action=getUserSnapshot �𑗐M���AApps Script �� getUserSnapshot_ �� task �V�[�g�S�̂� <UserId> �V�[�g�̐i���f�[�^���������ĕԂ��܂��Bstates �́Acode/output/hintOpened/submitted/savedAt �ɂ加えて採点結果の `score`/`comment` �𑝂₷�邽�߂Ɏg�p���܂��B�N���C�A���g�͂��� JSON �� learn.snapshot.<server> �ɕۑ����܂��B
+3. 課題と進捗のプリロード – startPreload() で POST action=getUserSnapshot を送信し、Apps Script の getUserSnapshot_ が task シート全体と <UserId> シートの進捗データを返します。states は code/output/hintOpened/submitted/savedAt に加えて採点結果の `score`/`comment` を含め、クライアントは JSON を learn.snapshot.<server> に保存します。
 4. 画面遷移 – セッションが有効であれば main.html へのボタンを有効にし、クリックで遷移します。無効の場合は login.html へ誘導します。
 
 ## プログラム実行（Pyodide → Matplotlib → GAS 保存）の流れ
@@ -77,7 +77,7 @@ GAS→ブラウザ: {status:'ok'}
 
 課題取得シーケンス:
 ブラウザ→GAS: POST getTasks(session)
-GAS→ブラウザ: {status:'ok', tasks=[...]} (task シート全体):contentReference[oaicite:10]{index=10}
+GAS→ブラウザ: {status:'ok', tasks=[...]} (task シート全体)
 ブラウザ→ブラウザ: tasksData に格納、renderTaskTree()
 
 課題保存シーケンス(教員):
@@ -87,7 +87,8 @@ GAS→スプレッドシート: task シートを upsert
 GAS→ブラウザ: {status:'ok', taskId}
 ブラウザ→ブラウザ: ツリー再読込
 この図を参考にして非同期処理と通信の流れを理解し、デバッグや拡張時に役立ててください。
+
 ## 集計シートの生成と参照
-- 再集計: Apps Script の ecomputeSubmissionSummary_ が task シートと各 <UserId> シートを走査し、提出済み>score=100>数値score>未提出の優先順位で件数を数え、submission_summary シートに書き出します。先頭行に GeneratedAt を入れ、以降は TaskId/Title/Path とクラス×4状態の列を並べます。
-- 参照: summary.html は既存シートを ction=getSubmissionSummary で読み込み、必要なときだけ ction=buildSubmissionSummary で再集計を依頼します。どちらも application/x-www-form-urlencoded で serverBaseUrl へ POST します。
+- 再集計: Apps Script の buildSubmissionSummary_ が task シートと各 <UserId> シートを走査し、提出済み>score=100>数値 score>未提出の優先順位で件数を数え、submission_summary シートに書き出します。先頭行に GeneratedAt を入れ、以降は TaskId/Title/Path とクラス×4状態の列を並べます。
+- 参照: summary.html は既存シートを action=getSubmissionSummary で読み込み、必要なときだけ action=buildSubmissionSummary で再集計を依頼します。どちらも application/x-www-form-urlencoded で serverBaseUrl へ POST します。
 - キャッシュ方針: 集計はシート生成時にのみ計算し、画面表示時はシート読み込みのみとすることでアクセスごとの待ち時間を削減します。
