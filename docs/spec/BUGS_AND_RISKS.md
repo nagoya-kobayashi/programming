@@ -25,7 +25,7 @@
 | データ形式    | 改行や文字エンコードの処理が不十分で全角やサロゲートペアを含むコードが破損する                                  | L   |
 | データ形式    | `data:image/png;base64,...` の出力を保存せず提出データに含めない                           | M   |
 | 採点         | `getClassSubmissions` がクラス全員分の `<UserId>` シートを順次読み込むため、人数が増えるとレスポンス遅延や GAS の実行制限に達する恐れ | M   |
-| 採点         | `saveScores` は `Submitted` が true の行のみ更新するため、提出フラグが残った課題は採点/再採点できない | M   |
+| 採点         | `saveScores` は `Submitted` が false の行を `force=true` 無しでは更新しないため、force 指定漏れがあると採点が反映されない | M   |
 
 ## 詳細と推定原因
 
@@ -45,7 +45,7 @@
 
 ### 採点
 - `getClassSubmissions` はクラス人数分の `<UserId>` シートを逐次読み込むため、大人数クラスではレスポンス遅延や GAS の実行時間超過に注意。
-- `saveScores` は `Submitted=true` の行だけが対象のため、提出フラグが解除されていない課題は再採点できず運用上の詰まりになり得る。（2025-11-20 現在、grading.js から `force=true` を付与して再採点や未提出課題の採点を許容するワークアラウンドを導入済みだが、GAS 側の仕様が変わっていない点には留意する。）
+- `saveScores` は `Submitted=false` の行を更新するには `force=true` が必須で、指定漏れがあると未提出・再提出解除後の採点が反映されない。grading.js では force を常に付けているが、他実装では同じ指定が必要。
 
 ### クライアント
 - セッション無効時の挙動: main.js は index.html と同じく検証失敗時に clearSession() を呼ばず window.dispatchEvent('session-ready') を発火するため、無効セッションで API を呼び続け突然 401 エラーが返ることがあります。検証失敗時は即座にログアウトすべきです。

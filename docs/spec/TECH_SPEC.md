@@ -32,7 +32,7 @@
 - **フォルダ単位の進捗表示**: 課題ツリーのフォルダ行は右端に「クリア済/総数」を表示し、採点対象外（Attribute=その他）を除いた配下課題の 100 点達成件数のみをカウントします。未クリアが残る場合はクリア済件数を青で表示し、全件クリア時はクリア済件数を緑色にしつつフォルダ名の左に学習画面と同じ ★ アイコンを重ねます（結果データ読み込み後にリアルタイム更新）。
 - 採点対象外: 課題属性が「その他」のものは常に `[採点対象外]` バッジとグレーのドットで表示し、提出ボタンは無効化します。提出済み扱いや満点アイコンには遷移せず、コメントバルーンも非表示になります。
 - 目的: 課題一覧の表示、問題の閲覧、コード編集、実行/保存/提出など学習に必要な機能を提供します。
-- UI 要素: サイドバー #taskList と #tasks は課題ツリーを表示し、フォルダには .toggle-btn、未提出・提出済み等の状態を示すバッジ .status-badge が付きます。問題表示領域は #problemTitle（タイトル）、#problemText（説明 HTML）、#hintButton と #hint（ヒント表示）。コードエディタは #editor で CodeMirror により構築され、支援用の透かしテキストは #ghostText に描画されます。実行・停止・保存・提出などの制御ボタン #playButton/#stopIconButton/#runButton/#stopButton/#saveButton/#submitButton、学習支援トグル #assistToggle とラベル #assistLabel、ヘルプ #helpButton、状態表示 #statusMessage、ログアウト #logoutButton があります。 またコード領域と実行結果領域の間には角丸のコメントバルーン #commentBubble を配置し、採点コメントや100点時の祝福メッセージ（スコア 100 の場合は固定文「満点クリア、お見事！ここまで積み上げた工夫が光っています。」）を吹き出し形式で表示します。バルーン全体をクリックすると折りたたまれて「…」アイコンになり、アイコンを押すと再展開します。バルーン下部には常に淡色のガイド文「クリックで最小化」が表示され、操作方法を明示します。課題属性が「その他」のときはコメントバルーンを非表示にします。
+- UI 要素: サイドバー #taskList と #tasks は課題ツリーを表示し、フォルダには .toggle-btn、未提出・提出済み等の状態を示すバッジ .status-badge が付きます。問題表示領域は #problemTitle（タイトル）、#problemText（説明 HTML）、#hintButton と #hint（ヒント表示）。コードエディタは #editor で CodeMirror により構築され、支援用の透かしテキストは #ghostText に描画されます。実行・停止・保存・提出などの制御ボタン #playButton/#stopIconButton/#runButton/#stopButton/#saveButton/#submitButton、学習支援トグル #assistToggle とラベル #assistLabel、ヘルプ #helpButton、状態表示 #statusMessage、ログアウト #logoutButton があります。 またコード領域と実行結果領域の間には角丸のコメントバルーン #commentBubble を配置し、採点コメントや100点時の祝福メッセージ（スコア 100 の場合は固定文「満点クリア、お見事！おめでとう♪」）を吹き出し形式で表示します。バルーン全体をクリックすると折りたたまれて「…」アイコンになり、アイコンを押すと再展開します。バルーン下部には常に淡色のガイド文「クリックで最小化」が表示され、操作方法を明示します。コメントもスコアも無い場合や課題属性が「その他」の場合はコメントバルーンを非表示にします。
 - 主要処理フロー:
  1.課題リストの読み込み – ページ読み込み時に SheetIO.requestTaskList (action=getTasks) を呼び出し、取得したタスクリストを tasksData に格納し renderTaskTree() で階層 UI を生成します。最後に選択した課題は SELECTED_KEY() に保存されており、初期表示時に復元されます。
  2.課題選択 – selectTask(taskId) は現在のコード/出力をローカルキャッシュに保存した後、新課題の詳細をキャッシュまたは SheetIO.requestTaskDetail (GET) から取得し、問題文・ヒント・CodeMirror に適用します。初回ヒント表示時は saveSpecificTask() が非同期で GAS にサイレント送信されます。
@@ -64,15 +64,16 @@
 - window.APP_CONFIG – オブジェクトであり、serverBaseUrl（GAS WebApp のベース URL）、saveScript・submitScript・resultsPath（別シートを利用する場合に上書きするエンドポイント）を保持します。初期値はビルド時に挿入されるため環境により異なります。
 
 ### comm_payload.js
-- createTaskListPayload(sessionId) – 課題一覧取得用のリクエストボディを application/x-www-form-urlencoded 形式で生成します。session=<sessionId>&action=getTasks を組み立て、CORS プリフライトを回避します。戻り値は文字列です。
-- createTaskSavePayload(sessionId, taskData) – 課題保存用のリクエストボディを生成します。taskData には taskId、parentId、isFolder、title、descriptionHtml、hintHtml、answerCode、initialCode を含めます。戻り値は文字列で、session が空の場合でも未認証保存を許可します。
-- その他 – createUserCodePayload など、課題提出やユーザーコード保存用のペイロード生成関数を提供します。各関数は URL エンコード処理で + をスペースに変換しますが、値に = や & を含む場合はエラーの原因となります。
+- createTaskListPayload(context) – 課題一覧取得用のオブジェクトを生成します。`{action:'getTasks', session|id/classId/number, _ts}` を返し、呼び出し側で URLSearchParams 化します。
+- createTaskDetailPayload(context, taskId) – session/id を含むクエリパラメータオブジェクトを生成します。
+- createTaskSavePayload(context, state) – コード保存・提出用のオブジェクトを生成します。`output` の改行を `\n` に正規化し、hintOpened/submitted を boolean 化します。
+- toQueryString(payload) / buildRequestInit(payload, opts) – URLSearchParams への変換や、GAS 宛では application/x-www-form-urlencoded を優先する fetch init を組み立てます（JSON 送信も opts で選択可）。
 
 ### sheet_io.js
-- requestTaskList() – createTaskListPayload を呼び出して fetch を実行し、Apps Script の getTasks_ を呼びます。戻り値は {status:'ok', tasks:[[header...],[row...],...]} 形式のオブジェクトで、ヘッダ行を含みます。
-- requestTaskDetail(taskId, session) – 個別の課題行を取得するための GET リクエストを生成し、Apps Script の getSavedTaskForUser_ と組み合わせてサーバーに保存された code、output、hintOpened、submitted を読み出します。
-- postTaskSave(params) – 課題またはユーザーコードを保存するために、指定の URL（/exec または saveScript）へ POST します。戻り値は JSON 形式で status:'ok' と保存された taskId などを返します。失敗時は例外を投げます。
-- fetchResults(params) – テスト結果等を別シートから読み出す場合に使用します。現在は未使用です。
+- requestTaskList(payload) – CommPayload.toQueryString でエンコードし、serverBaseUrl へ POST（application/x-www-form-urlencoded）するだけの薄い fetch ラッパー。戻り値は Response。
+- requestTaskDetail(queryPayload) – serverBaseUrl に GET クエリでアクセスし、課題詳細 (getSavedTaskForUser_) を取得する Response を返す。
+- postTaskSave(payload, path) – CommPayload.buildRequestInit で form/json を選択し、saveScript もしくは serverBaseUrl へ POST する。
+- fetchResults(path) – resultsPath など任意 URL を GET するシンプルなラッパー。戻り値は Response。
 
 ### main 系モジュール
 - main.js – セッション検証・スナップショット読み込み・Pyodide 初期化・各モジュール呼び出しを司るエントリーポイントです。

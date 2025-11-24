@@ -5,7 +5,7 @@
 | Endpoint | HTTP | 役割 |
 | --- | --- | --- |
 | `doGet` | GET | `action` に応じて `getTasks_` / `getSalt_` / `getUserMeta_` / `initPassword_` / `login_` / `logout_` / `ping` / `validateSessionEndpoint_` / `getSavedTaskForUser_` を返却。未知の `action` は `status:error`。|
-| `doPost` | POST | `getTasks_`, `getUserSnapshot_`, `saveTask_` を優先し、それ以外はすべて `saveUserCode_` にフォールバック。|
+| `doPost` | POST | `getTasks_`, `getUserSnapshot_`, `saveTask_`, `getClassSubmissions_`, `saveScores_`, `getSubmissionSummary_`, `buildSubmissionSummary_` を優先し、それ以外はすべて `saveUserCode_` にフォールバック。|
 
 > NOTE: `ping` は GET のみ対応。フロント (index.html) は POST `action=ping` を送信しているため、Apps Script 側では `saveUserCode_` が呼ばれて `missing taskId` エラーを返している。
 
