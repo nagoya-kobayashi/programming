@@ -51,7 +51,7 @@ GAS → <UserId> シート: Score/Comment を SavedAt の右側に書き込み S
 GAS → 採点ページ: {status:'ok', updated:n}
 
 学習画面への反映:
-index.html の getUserSnapshot → localStorage.learn.snapshot.<server> に score/comment を含めて保存 → task_panel.js の loadResults() がスナップショットから score を取得 → `[採点済]` バッジ、score=100 なら `.task-icon.sparkle-star`（単色ゴールド＋太めの輪郭と斜めグリント）、100 点未満ならピンク (`#ff8fb7`) の `.dot-icon` を適用し、さらに dirty フラグが立った場合はスコアがあっても `[編集中]` 表示が優先される → `submitted=true` の課題は紫 (`#9254de`) のドットと `[提出済]` を表示し、再提出時は submitted=true となり `[提出済]` が最優先で表示される。task_selection.js は取得した comment を `#commentBubble` に描画し、コメントが無いが score=100 の場合は固定メッセージ「満点クリア、お見事！おめでとう♪」を表示、バルーンの下部には常時「クリックで最小化」というガイド文を添える。コメントもスコアも無ければバルーンを非表示にする。
+index.html の getUserSnapshot → localStorage.learn.snapshot.<server> に score/comment を含めて保存 → task_panel.js の loadResults() がスナップショットから score を取得 → `[採点済]` バッジ、score=100 なら `.task-icon.sparkle-star`（属性に応じて基礎=緑/演習=青/発展=赤、分類外は金色のスター＋太めの輪郭と斜めグリント）、100 点未満ならピンク (`#ff8fb7`) の `.dot-icon` を適用し、さらに dirty フラグが立った場合はスコアがあっても `[編集中]` 表示が優先される → `submitted=true` の課題は紫 (`#9254de`) のドットと `[提出済]` を表示し、再提出時は submitted=true となり `[提出済]` が最優先で表示される。task_selection.js は取得した comment を `#commentBubble` に描画し、コメントが無いが score=100 の場合は固定メッセージ「満点クリア、お見事！おめでとう♪」を表示、バルーンの下部には常時「クリックで最小化」というガイド文を添える。コメントもスコアも無ければバルーンを非表示にする。
 ***
 参加者: ユーザー   ブラウザ(学習画面 JS)   Pyodide Worker   GAS / スプレッドシート
 
