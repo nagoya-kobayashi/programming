@@ -29,8 +29,10 @@
 
 ### main.html（学習画面）
 - **課題一覧のステータス**: `task_panel.js` は `submitted` が true の課題を最優先で `[提出済]` 表示にし（色は `statusColors.submitted=#9254de` の紫ドット）、`score` が存在して提出解除済みの場合は `[採点済]` を表示します。`score=100` の課題には `.task-icon.sparkle-star` を付与し、単一の金色 ★ に太めの輪郭とグリント（`::after`）を重ねることでくっきりした満点アイコンを表示します。100 点未満の採点済み課題は `statusColors.graded=#ff8fb7` のピンクドットで視覚的に区別します。さらに、採点済みの課題でもコード編集や実行で `markTaskDirty()` が立つと `[編集中]` を優先表示し、保存成功時には `computeStatusKey()` が自動的に `[スコア点]` へ戻します（`[保存済]` には遷移しない）。再提出時は `hasAnySubmittedRecord()` が優先されるため、採点済みでも `[提出済]` が表示されます。
+- **フォルダ単位の進捗表示**: 課題ツリーのフォルダ行は右端に「クリア済/総数」を表示し、採点対象外（Attribute=その他）を除いた配下課題の 100 点達成件数のみをカウントします。未クリアが残る場合はクリア済件数を青で表示し、全件クリア時はクリア済件数を緑色にしつつフォルダ名の左に学習画面と同じ ★ アイコンを重ねます（結果データ読み込み後にリアルタイム更新）。
+- 採点対象外: 課題属性が「その他」のものは常に `[採点対象外]` バッジとグレーのドットで表示し、提出ボタンは無効化します。提出済み扱いや満点アイコンには遷移せず、コメントバルーンも非表示になります。
 - 目的: 課題一覧の表示、問題の閲覧、コード編集、実行/保存/提出など学習に必要な機能を提供します。
-- UI 要素: サイドバー #taskList と #tasks は課題ツリーを表示し、フォルダには .toggle-btn、未提出・提出済み等の状態を示すバッジ .status-badge が付きます。問題表示領域は #problemTitle（タイトル）、#problemText（説明 HTML）、#hintButton と #hint（ヒント表示）。コードエディタは #editor で CodeMirror により構築され、支援用の透かしテキストは #ghostText に描画されます。実行・停止・保存・提出などの制御ボタン #playButton/#stopIconButton/#runButton/#stopButton/#saveButton/#submitButton、学習支援トグル #assistToggle とラベル #assistLabel、ヘルプ #helpButton、状態表示 #statusMessage、ログアウト #logoutButton があります。 またコード領域と実行結果領域の間には角丸のコメントバルーン #commentBubble を配置し、採点コメントや100点時の祝福メッセージ（スコア 100 の場合は固定文「満点クリア、お見事！ここまで積み上げた工夫が光っています。」）を吹き出し形式で表示します。バルーン全体をクリックすると折りたたまれて「…」アイコンになり、アイコンを押すと再展開します。バルーン下部には常に淡色のガイド文「クリックで最小化」が表示され、操作方法を明示します。
+- UI 要素: サイドバー #taskList と #tasks は課題ツリーを表示し、フォルダには .toggle-btn、未提出・提出済み等の状態を示すバッジ .status-badge が付きます。問題表示領域は #problemTitle（タイトル）、#problemText（説明 HTML）、#hintButton と #hint（ヒント表示）。コードエディタは #editor で CodeMirror により構築され、支援用の透かしテキストは #ghostText に描画されます。実行・停止・保存・提出などの制御ボタン #playButton/#stopIconButton/#runButton/#stopButton/#saveButton/#submitButton、学習支援トグル #assistToggle とラベル #assistLabel、ヘルプ #helpButton、状態表示 #statusMessage、ログアウト #logoutButton があります。 またコード領域と実行結果領域の間には角丸のコメントバルーン #commentBubble を配置し、採点コメントや100点時の祝福メッセージ（スコア 100 の場合は固定文「満点クリア、お見事！ここまで積み上げた工夫が光っています。」）を吹き出し形式で表示します。バルーン全体をクリックすると折りたたまれて「…」アイコンになり、アイコンを押すと再展開します。バルーン下部には常に淡色のガイド文「クリックで最小化」が表示され、操作方法を明示します。課題属性が「その他」のときはコメントバルーンを非表示にします。
 - 主要処理フロー:
  1.課題リストの読み込み – ページ読み込み時に SheetIO.requestTaskList (action=getTasks) を呼び出し、取得したタスクリストを tasksData に格納し renderTaskTree() で階層 UI を生成します。最後に選択した課題は SELECTED_KEY() に保存されており、初期表示時に復元されます。
  2.課題選択 – selectTask(taskId) は現在のコード/出力をローカルキャッシュに保存した後、新課題の詳細をキャッシュまたは SheetIO.requestTaskDetail (GET) から取得し、問題文・ヒント・CodeMirror に適用します。初回ヒント表示時は saveSpecificTask() が非同期で GAS にサイレント送信されます。
@@ -43,6 +45,7 @@
 - 目的: 提出済みのコードを一覧し、スコアやコメントを付けて保存する採点用画面。`Submitted` が true のデータが存在することを前提とし、未提出のみの場合は閲覧専用になる。
 - UI: ヘッダーで「クラス指定（class モード）」と「ユーザー指定（user モード）」を切り替え、classId には `ALL` も指定可能。入力欄は #classInput/#userInput、読み込みボタンは #loadButton、提出済みのみを表示するチェックは #submittedOnlyToggle（設定を `grading.<server>.submittedOnly` に保存）、提出済み全員へ 100 点を入れる一括ボタンが #bulkFullButton、保存ボタンは #saveButton。
 - 課題ツリー: 左サイドバー #taskTree に tasks をフォルダ優先→タイトル→order の順でソートして表示。提出済み件数を `.task-count` で表示し、クリックで selectTask() を発火する。折りたたみ状態は session ごとに保持する。
+- 採点対象外: 課題属性が「その他」の課題は action=getClassSubmissions の段階で除外され、ツリーや採点表に表示されない。古いキャッシュから復元する場合も normalizeTasks で「その他」属性の課題をフィルタする。
 - 採点カード: 右側に選択課題の #taskSummary と #gradingTable を表示。各 `.student-card` は番号・ユーザーID・提出状態バッジ（pending/提出済/採点済/未提出）、提出コード、出力を表示する。出力に "[plot]" を含む場合は grading.js で Pyodide と matplotlib を同期ロードし、提出コードをそのまま実行して得たグラフを横幅 50% のサムネイルで埋め込む（入力待ちや割り込みは考慮せず単純実行）。
 - 編集と保存: score/comment は提出済みや採点済み行で直接編集でき、未提出行は tab 移動できないよう `tabIndex=-1` を設定しつつクリック入力は可能。変更すると card の `data-editing=true` になり dirty として保存対象になる。保存時は dirty 行のみを検証し、score が空/非数/0–100 外ならエラー。未提出行は payload に `force:true` を付けて saveScores に POST し、GAS 側で `<UserId>` シートの Submitted を FALSE にしつつ Score/Comment/SavedAt を更新する。保存結果は submissions/localGrades に反映され、score=100 は学習画面の `.sparkle-star` 表示に繋がる。
 - フィルタとキャッシュ: `submittedOnly` チェックで未提出行を隠し、設定は localStorage に保持。`action=getClassSubmissions` (POST) で tasks、students[{userId,number,classId}]、submissions[userId][taskId]={code,output,hintOpened,submitted,score,comment,savedAt} を取得。レスポンスを `grading.<server>.cache.<ClassId>` に tasks/students/submissions/localGrades/fetchedAt として保存し、`lastLoadedAt` を付けて差分取得する。ユーザー検索時に判明した classId は `grading.<server>.userClass.<UserId>` に記憶する。
@@ -50,8 +53,9 @@
 
 ### task_editor.html（課題エディタ）
 - 目的: 教員が課題ツリーを閲覧・作成・編集し、スプレッドシート上の task テーブルに保存するための画面です。
-- UI 要素: 左ペインのツリー #taskTree と操作ボタン (#btnNewTask、#btnNewFolder、#btnCopy、#btnReload)、中央フォーム (#taskId、#taskTitle、#taskParentId、#taskDesc、#taskHint、#saveTaskButton、#taskStatusMsg)、右ペインの CodeMirror (#answerEditor、#initialEditor)。
+- UI 要素: 左ペインのツリー #taskTree と操作ボタン (#btnNewTask、#btnNewFolder、#btnCopy、#btnReload)、中央フォーム (#taskId、#taskTitle、#taskParentId、課題属性セレクト #taskAttribute、#taskDesc、#taskHint、#saveTaskButton、#taskStatusMsg)、右ペインの CodeMirror (#answerEditor、#initialEditor)。
 - 主要処理: init() で CodeMirror を初期化し、各種ボタンのイベントを登録します。loadTaskList() は POST action=getTasks を実行してタスクリストを正規化し、window.__TASKS に保存した上で renderTaskTree() を呼び出します。タスク選択時に setActiveTask() を呼び、フォームに値を反映します。saveTask() は URLSearchParams を組み立てて POST action=saveTask を送信し、戻り値の taskId を反映し直ちに loadTaskList() を再実行します。コピー機能は現在選択されたタスクを複製し、新しい TaskId を生成して保存します。
+- 属性設定: Attribute は「基礎/演習/発展/その他」を保持し、未選択の場合は task シート保存時に第2階層フォルダ名が (1)基礎/(2)演習/(3)発展 に一致するかで自動判定されます。一致しない場合は「その他」となり、課題は採点対象外として扱われます。フォルダ作成モードでは属性セレクトは無効化されます。
 
 ## JavaScript 関数の詳細
 この節では主要な関数の振る舞い、引数、戻り値、例外を記述します。実装の一部は非同期 (Promise) を返します。関数名はファイル内の定義順に列挙しています。
@@ -122,7 +126,7 @@ Apps Script (Code.gs) では Google スプレッドシートをデータベー�
 | ---------- | ----------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
 | `user`     | `ID`, `Password`, `ClassId`, `Number`, `SALT`                                                         | 登録ユーザーの認証情報。`getUserRowById_` が ID 正規化を行い、`initPassword_` が SALT とハッシュ値を保存します。                 |
 | `session`  | `SessionId`, `UserId`, `ClassId`, `Number`, `LastActive`                                              | 発行されたセッションの管理。`validateSession_` は `LastActive` を更新し、有効期限チェックを行います。                            |
-| `task`     | `TaskId`, `ParentId`, `IsFolder`, `Title`, `DescriptionHtml`, `HintHtml`, `AnswerCode`, `InitialCode` | 課題のメタデータ。`saveTask_` は既存行を更新し、`TaskId` 未指定の場合は `T` + UUID を自動採番します。                            |
+| `task`     | `TaskId`, `ParentId`, `IsFolder`, `Title`, `Attribute`, `DescriptionHtml`, `HintHtml`, `AnswerCode`, `InitialCode` | 課題のメタデータ。`Attribute` は「基礎/演習/発展/その他」を保持し、未指定時は第2階層フォルダ名が (1)基礎/(2)演習/(3)発展 に一致するかで自動判定、一致しない場合は「その他」となります。`saveTask_` は既存行を更新し、`TaskId` 未指定の場合は `T` + UUID を自動採番します。                            |
 | `<UserId>` | `TaskId`, `Code`, `Output`, `HintOpened`, `Submitted`, `SavedAt`, `Score`, `Comment`                  | ユーザーごとの進捗データ。`saveUserCode_` が行を upsert。採点ページは `Score`/`Comment` を更新しつつ `Submitted` を解除し、`getSavedTaskForUser_` と `getUserSnapshot_` が読み出します。 |
 
 ## エラー処理と再試行ロジック
@@ -147,3 +151,4 @@ Apps Script (Code.gs) では Google スプレッドシートをデータベー�
 - データソース: Apps Script の getSubmissionSummary（キャッシュ読み込み）と buildSubmissionSummary（再集計）を利用。シートは TaskId/Title/Path に続けて <Class> クリア済 <Class> 採点済 <Class> 提出済 <Class> 未提出 を4列1組で並べ、1行目に GeneratedAt を保持します。
 - 判定ルール: submitted=true を最優先、次に score=100 をクリア、score が数値なら採点済み、それ以外は未提出としてカウントします。
 - UI: フィルタ入力、クラス列の表示/非表示トグル、集計シートを読み込む/再集計して更新 ボタン、横スクロール可能なテーブルで件数を表示します。
+- 採点対象外: Attribute が「その他」の課題は再集計・キャッシュ読み込みともに除外し、件数にも反映しません。クライアント側でも path から推測した属性でフィルタします。

@@ -7,6 +7,7 @@
 1. ページ読み込み – index.html は localStorage.sessionId と URL の sid パラメータを読み出します。両者が一致しない場合はログインを要求します。
 2. セッション検証 – fetch(serverBaseUrl, {method:'POST', body:'action=ping&session=<id>'}) を送信しますが、GAS 側に ping ハンドラが無いため saveUserCode_ にフォールバックし、missing taskId エラーが返されます。フロントは catch で {status:'ok'} と扱います。
 3. 課題と進捗のプリロード – startPreload() で POST action=getUserSnapshot を送信し、Apps Script の getUserSnapshot_ が task シート全体と <UserId> シートの進捗データを返します。states は code/output/hintOpened/submitted/savedAt に加えて採点結果の `score`/`comment` を含め、クライアントは JSON を learn.snapshot.<server> に保存します。
+4. 採点対象外の扱い – task シートには Attribute 列が含まれ、クライアントは Attribute が「その他」の課題をログイン画面の状態サマリから除外します（学習画面では `[採点対象外]` としてのみ表示）。
 4. 画面遷移 – セッションが有効であれば main.html へのボタンを有効にし、クリックで遷移します。無効の場合は login.html へ誘導します。
 
 ## プログラム実行（Pyodide → Matplotlib → GAS 保存）の流れ
