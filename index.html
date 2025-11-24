@@ -44,6 +44,28 @@
     .attr-progress-none { color: #999; font-size: 0.9rem; }
   </style>
   <style>
+    /* トップページのハイスコア表示 */
+    .top-scores { margin-top: 16px; padding: 12px; border: 1px solid #e5e5e5; border-radius: 10px; background: #f7fbff; }
+    .top-scores__head { display: flex; justify-content: flex-start; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+    .top-scores__title { font-weight: 700; color: #1d1d1f; }
+    .top-scores__table-wrap { margin-top: 8px; overflow: auto; }
+    .top-scores__table { border-collapse: separate; border-spacing: 0; min-width: 520px; width: 100%; }
+    .top-scores__table thead th { background: #eef4ff; color: #1d1d1f; font-size: 12px; padding: 4px 5px; border: 1px solid #dbe6ff; text-align: center; white-space: nowrap; }
+    .top-scores__table tbody td { background: #fff; border: 1px solid #e5e5e5; padding: 3px 4px; font-size: 12px; text-align: center; }
+    .top-scores__table .rank-col { position: sticky; left: 0; width: 28px; background: #f7fbff; font-weight: 800; color: #1677ff; }
+    .top-scores__table .cls-col { position: sticky; left: 28px; background: #f7fbff; font-weight: 700; min-width: 70px; }
+    .top-scores__table .clear-col { min-width: 70px; }
+    .top-scores__table .sum-col { min-width: 90px; }
+    .top-scores__table .attr-col { min-width: 120px; text-align: left; white-space: nowrap; }
+    .top-scores__table .compact-token { margin-right: 3px; font-weight: 700; }
+    .top-scores__table th.task-head { min-width: 30px; }
+    .top-scores__table .score-cell { font-variant-numeric: tabular-nums; }
+    .top-scores__table .score-star { color: #f5a524; font-weight: 800; }
+    .top-scores__status { margin-top: 8px; color: #888; font-size: 0.9em; }
+    .user-mini { margin: 10px 0 8px; padding: 8px 10px; border: 1px solid #e0e0e0; border-radius: 8px; background: #f5f9ff; font-weight: 600; color: #2b2b2b; font-size: 14px; }
+    .user-mini .muted { color: #666; font-weight: 500; }
+  </style>
+  <style>
     /* 事前プリロード中の簡易インジケータ */
     #preloadStatus { font-size: 0.9em; color: #555; margin: 8px 0; }
   </style>
@@ -55,8 +77,17 @@
     <div class="actions">
       <button id="primaryBtn">読み込み中...</button>
     </div>
-    <div id="taskStateSummary" class="task-state-summary" hidden></div>
     <div id="note" class="msg"></div>
+    <div id="taskStateSummary" class="task-state-summary" hidden></div>
+    <div id="topScores" class="top-scores" hidden>
+      <div class="top-scores__head">
+        <div class="top-scores__title">ハイスコア（上位20名）</div>
+      </div>
+      <div class="top-scores__table-wrap">
+        <table id="topScoresTable" class="top-scores__table"></table>
+      </div>
+      <div id="topScoresStatus" class="top-scores__status"></div>
+    </div>
   </div>
 
   <script>
@@ -199,6 +230,185 @@
     return `learn.${suffix}.${base}`;
   };
   const SELECTED_KEY = () => BASE_KEY('selectedTask');
+  const TOP_SCORES_LIMIT = 20;
+  const EXCLUDE_ATTRIBUTE = 'その他';
+  const ATTR_ALLOWED = ['基礎', '演習', '発展', 'その他'];
+  const ATTR_COLORS = {
+    '基礎': '#35c759',
+    '演習': '#2d8dfc',
+    '発展': '#ff4d67',
+    'その他': '#f3b12f'
+  };
+
+  async function fetchUserProgressCached() {
+    if (!serverBaseUrl) return null;
+    try {
+      const params = new URLSearchParams();
+      params.append('action', 'getUserProgress');
+      const res = await fetch(buildUrl(), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: params.toString()
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      if (!data || data.status !== 'ok') throw new Error(data && data.message ? data.message : 'load failed');
+      return data;
+    } catch (err) {
+      console.warn('[index] fetchUserProgressCached failed', err);
+      return null;
+    }
+  }
+
+  function renderTopScores(data) {
+    const wrap = document.getElementById('topScores');
+    const tableEl = document.getElementById('topScoresTable');
+    const statusEl = document.getElementById('topScoresStatus');
+    if (!wrap || !tableEl || !statusEl) return;
+
+    tableEl.innerHTML = '';
+    statusEl.textContent = '';
+
+    if (!data || !Array.isArray(data.tasks) || !Array.isArray(data.rows)) {
+      wrap.hidden = true;
+      return;
+    }
+    const tasks = data.tasks || [];
+    const filteredTasks = tasks
+      .map((t, idx) => ({ ...t, idx, attribute: normalizeAttribute(t.attribute) }))
+      .filter(t => t.attribute !== EXCLUDE_ATTRIBUTE && t.isFolder !== true);
+    if (!filteredTasks.length) {
+      statusEl.textContent = '表示対象の課題がありません（その他を除外しています）';
+      wrap.hidden = false;
+      return;
+    }
+
+    const entries = data.rows.map(row => {
+      let scoreSum = 0;
+      let cleared = 0;
+      const total = filteredTasks.length;
+      const scores = filteredTasks.map(t => {
+        const scoreRaw = row.scores ? row.scores[t.idx] : '';
+        const num = Number(scoreRaw);
+        if (!Number.isNaN(num)) {
+          scoreSum += num;
+          if (num === 100) cleared += 1;
+        }
+        return { taskId: t.taskId, value: scoreRaw, attribute: t.attribute };
+      });
+      return { classId: row.classId || '', scoreSum, cleared, total, scores };
+    });
+
+    const sorted = entries
+      .filter(e => e.scoreSum || e.scoreSum === 0)
+      .sort((a, b) => b.scoreSum - a.scoreSum)
+      .slice(0, TOP_SCORES_LIMIT);
+
+    if (!sorted.length) {
+      statusEl.textContent = '表示できるスコアがありません';
+      wrap.hidden = false;
+      return;
+    }
+
+    // ヘッダ作成（属性 / フォルダ / 課題名）
+    const thead = document.createElement('thead');
+    const attrRow = document.createElement('tr');
+
+    const headerCells = [
+      { text: '順位', className: 'rank-col' },
+      { text: 'クラス', className: 'cls-col' },
+      { text: 'クリア件数', className: 'clear-col' },
+      { text: 'スコア合計', className: 'sum-col' },
+      { text: '基礎', className: 'attr-col', attr: '基礎' },
+      { text: '演習', className: 'attr-col', attr: '演習' },
+      { text: '発展', className: 'attr-col', attr: '発展' }
+    ];
+    headerCells.forEach((h) => {
+      const th = document.createElement('th');
+      th.textContent = h.text;
+      th.className = h.className || '';
+      th.rowSpan = 1;
+      attrRow.appendChild(th);
+    });
+
+    thead.appendChild(attrRow);
+
+    const tbody = document.createElement('tbody');
+    sorted.forEach((e, i) => {
+      const tr = document.createElement('tr');
+      const rankTd = document.createElement('td');
+      rankTd.className = 'rank-col';
+      rankTd.textContent = i + 1;
+      const clsTd = document.createElement('td');
+      clsTd.className = 'cls-col';
+      clsTd.textContent = e.classId || '―';
+      const clearTd = document.createElement('td');
+      clearTd.className = 'clear-col';
+      clearTd.textContent = `${e.cleared}/${e.total}`;
+      const sumTd = document.createElement('td');
+      sumTd.className = 'sum-col';
+      sumTd.textContent = e.scoreSum;
+      tr.appendChild(rankTd);
+      tr.appendChild(clsTd);
+      tr.appendChild(clearTd);
+      tr.appendChild(sumTd);
+
+      ['基礎', '演習', '発展'].forEach(attr => {
+        const td = document.createElement('td');
+        td.className = 'attr-col';
+        td.style.color = ATTR_COLORS[attr] || '#1f1f1f';
+        const tokens = [];
+        filteredTasks.forEach((t, idx) => {
+          if (t.attribute !== attr) return;
+          const score = e.scores[idx] ? e.scores[idx].value : '';
+          const num = Number(score);
+          if (score === '' || score === null || score === undefined) {
+            tokens.push('');
+          } else if (!Number.isNaN(num) && num === 100) {
+            tokens.push('★');
+          } else if (!Number.isNaN(num) && num !== 0) {
+            tokens.push(String(num));
+          } else {
+            tokens.push('');
+          }
+        });
+        td.textContent = tokens.join('');
+        tr.appendChild(td);
+      });
+
+      tbody.appendChild(tr);
+    });
+
+    tableEl.innerHTML = '';
+    tableEl.appendChild(thead);
+    tableEl.appendChild(tbody);
+
+    statusEl.textContent = '';
+    wrap.hidden = false;
+  }
+
+  function summarizeSelfProgress(tasks, states) {
+    let total = 0;
+    let cleared = 0;
+    let scoreSum = 0;
+    let maxScore = 0;
+    const attrSet = new Set(ATTR_ALLOWED);
+    tasks.forEach(t => {
+      const attr = normalizeAttribute(t.attribute);
+      if (!attrSet.has(attr) || attr === EXCLUDE_ATTRIBUTE) return;
+      if (t.isFolder) return;
+      total += 1;
+      maxScore += 100;
+      const st = states[String(t.id)] || states[t.id] || {};
+      const raw = st.score;
+      const num = Number(raw);
+      if (!Number.isNaN(num)) {
+        scoreSum += num;
+        if (num === 100) cleared += 1;
+      }
+    });
+    return { total, cleared, scoreSum, maxScore };
+  }
   function canonicalHeader(h) { return String(h || '').replace(/^\uFEFF/, '').trim().toLowerCase(); }
   function toBool(v) { const s = String(v || '').trim().toLowerCase(); return s === 'true' || s === '1' || s === 'yes' || s === 'y'; }
   function normalizeAttribute(value) {
@@ -386,6 +596,14 @@
     const grouped = classifyTasks(tasks, snapshot.states || {});
     container.innerHTML = '';
 
+    const selfMini = summarizeSelfProgress(tasks, snapshot.states || {});
+    if (selfMini.total > 0) {
+      const mini = document.createElement('div');
+      mini.className = 'user-mini';
+      mini.textContent = `あなたの進捗: クリア件数 ${selfMini.cleared}/${selfMini.total}｜スコア ${selfMini.scoreSum}/${selfMini.maxScore}`;
+      container.appendChild(mini);
+    }
+
     const caption = document.createElement('div');
     caption.className = 'state-caption';
     caption.textContent = '課題の状態';
@@ -544,6 +762,9 @@
       console.log('[index] preload: done');
       __preloadRunning = false;
       renderSnapshotSummaryFromStorage();
+      // ハイスコアも読み込み（シート読み込みのみ）
+      const prog = await fetchUserProgressCached();
+      renderTopScores(prog);
     }
   }
 
@@ -555,6 +776,8 @@
       startPreload();
     } else {
       renderSnapshotSummaryFromStorage();
+      // セッションが無くてもシートは閲覧だけ行う（必要に応じて表示）
+      fetchUserProgressCached().then(renderTopScores);
     }
   });
   // セッションがvalidate後に確定した場合はこちらでプリロード開始
