@@ -87,3 +87,7 @@ GAS→スプレッドシート: task シートを upsert
 GAS→ブラウザ: {status:'ok', taskId}
 ブラウザ→ブラウザ: ツリー再読込
 この図を参考にして非同期処理と通信の流れを理解し、デバッグや拡張時に役立ててください。
+## 集計シートの生成と参照
+- 再集計: Apps Script の ecomputeSubmissionSummary_ が task シートと各 <UserId> シートを走査し、提出済み>score=100>数値score>未提出の優先順位で件数を数え、submission_summary シートに書き出します。先頭行に GeneratedAt を入れ、以降は TaskId/Title/Path とクラス×4状態の列を並べます。
+- 参照: summary.html は既存シートを ction=getSubmissionSummary で読み込み、必要なときだけ ction=buildSubmissionSummary で再集計を依頼します。どちらも application/x-www-form-urlencoded で serverBaseUrl へ POST します。
+- キャッシュ方針: 集計はシート生成時にのみ計算し、画面表示時はシート読み込みのみとすることでアクセスごとの待ち時間を削減します。
