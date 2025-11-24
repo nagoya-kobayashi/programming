@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <title>ユーザ進捗一覧 | プログラミング学習</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="progress.css" />
+  <script src="config.js"></script>
+  <script defer src="progress.js"></script>
+</head>
+<body>
+  <div class="progress-page">
+    <header class="hero">
+      <div class="hero-text">
+        <p class="eyebrow">ユーザ進捗モニタ</p>
+        <h1>ユーザ別スコアマトリクス</h1>
+        <p class="lede">
+          スプレッドシート上に作成したユーザ×課題のスコア表をそのまま参照し、100点は属性色の★、採点済みはスコア、未採点は空欄で表示します。
+          ユーザ情報と属性別サマリ列を固定表示し、横スクロール時も追従します。
+        </p>
+        <div class="meta-line">
+          <span id="generatedAt" class="meta-pill">更新日時: --</span>
+          <span id="dataSource" class="meta-pill muted">ソース: --</span>
+          <span class="meta-pill subtle">シート名: user_progress</span>
+        </div>
+      </div>
+      <div class="hero-actions">
+        <button id="reloadButton" type="button" class="ghost">シートを読み込む</button>
+        <button id="rebuildButton" type="button" class="primary">再集計して更新</button>
+      </div>
+    </header>
+
+    <div id="statusMessage" class="status-line"></div>
+
+    <section class="panel">
+      <div class="panel-head">
+        <div class="filter-group">
+          <label for="classFilter" class="filter-label">クラス/ユーザ絞り込み</label>
+          <input id="classFilter" type="search" placeholder="例: 1A や user01 を含む行だけ表示" />
+        </div>
+        <div class="filter-group">
+          <label for="taskSearch" class="filter-label">タスク検索</label>
+          <input id="taskSearch" type="search" placeholder="課題名・パスでヘッダを検索" />
+        </div>
+        <div class="sort-group">
+          <span class="filter-label">並び替え</span>
+          <div class="sort-buttons">
+            <button type="button" id="sortUserButton" class="ghost small">ユーザID ▲</button>
+            <button type="button" id="sortCountButton" class="ghost small">件数 ▼</button>
+            <button type="button" id="sortScoreButton" class="ghost small">スコア ▼</button>
+          </div>
+        </div>
+        <div class="legend" id="legend">
+          <button type="button" class="legend-item" data-attr="基礎"><span class="star demo basic">★</span>基礎</button>
+          <button type="button" class="legend-item" data-attr="演習"><span class="star demo practice">★</span>演習</button>
+          <button type="button" class="legend-item" data-attr="発展"><span class="star demo advanced">★</span>発展</button>
+          <button type="button" class="legend-item" data-attr="その他"><span class="star demo other">★</span>その他</button>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table id="progressTable" class="progress-table"></table>
+      </div>
+      <p class="hint">
+        「再集計して更新」で user_progress シートを再生成し、「シートを読み込む」で既存のシートを高速に参照します。
+        採点済みでないセルは空欄、100点は属性色の★を表示します。タスク検索は一致するヘッダのみを表示し、サマリ値は全課題を基準に計算されたまま固定されます。
+      </p>
+    </section>
+  </div>
+</body>
+</html>
