@@ -16,6 +16,7 @@ const SPREADSHEET_ID = '<<1ZCYBcG9jqGHUzu0oUnWyY41wNhTZlug4oEIB4f3tWvo>>'; // �
 const TIMEZONE = 'Asia/Tokyo';
 const SESSION_TTL_MINUTES = 0;
 const SUBMISSION_SUMMARY_SHEET = 'submission_summary';
+const USER_PROGRESS_SHEET = 'user_progress';
 const TASK_ATTRIBUTE_LABELS = ['基礎', '演習', '発展', 'その他'];
 
 /* ===================== Entry Points ===================== */
@@ -61,6 +62,8 @@ function doPost(e) {
     if (action === 'saveScores') return saveScores_(e);
     if (action === 'getSubmissionSummary') return getSubmissionSummary_(e);
     if (action === 'buildSubmissionSummary') return buildSubmissionSummary_(e);
+    if (action === 'getUserProgress') return getUserProgress_(e);
+    if (action === 'buildUserProgress') return buildUserProgress_(e);
     return saveUserCode_(e);
   } catch (err) {
     return json_({ status: 'error', message: String(err) });
@@ -1300,6 +1303,236 @@ function buildSubmissionSummary_(e) {
   const result = recomputeSubmissionSummary_();
   result.source = 'rebuilt';
   return json_(result);
+}
+
+/* ===================== ユーザ進捗表生成・取得 ===================== */
+
+function sortTasksForProgress_() {
+  const { tasks, pathMap } = loadTasksForSummary_();
+  if (!tasks || !tasks.length) return [];
+  const order = new Map();
+  TASK_ATTRIBUTE_LABELS.forEach((attr, idx) => order.set(attr, idx));
+
+  return tasks
+    .filter(t => t && !t.isFolder)
+    .map(t => {
+      const attribute = normalizeTaskAttributeValue_(t.attribute) || deriveAttributeFromPath_(t.taskId, pathMap) || 'その他';
+      const path = pathMap[t.taskId] || t.title || t.taskId;
+      return {
+        taskId: t.taskId,
+        title: t.title || t.taskId,
+        path: path,
+        attribute
+      };
+    })
+    .sort((a, b) => {
+      const ai = order.has(a.attribute) ? order.get(a.attribute) : order.size + 1;
+      const bi = order.has(b.attribute) ? order.get(b.attribute) : order.size + 1;
+      if (ai !== bi) return ai - bi;
+      const ap = a.path || a.title || a.taskId;
+      const bp = b.path || b.title || b.taskId;
+      const pathCmp = String(ap || '').localeCompare(String(bp || ''), 'ja');
+      if (pathCmp !== 0) return pathCmp;
+      return String(a.taskId || '').localeCompare(String(b.taskId || ''), 'ja');
+    });
+}
+
+function buildUserProgressData_() {
+  const tasks = sortTasksForProgress_();
+  const students = listStudents_();
+  const attrTotals = {};
+  TASK_ATTRIBUTE_LABELS.forEach(attr => { attrTotals[attr] = { total: 0, maxScore: 0 }; });
+
+  tasks.forEach(t => {
+    const attr = attrTotals[t.attribute] ? t.attribute : 'その他';
+    if (!attrTotals[attr]) attrTotals[attr] = { total: 0, maxScore: 0 };
+    attrTotals[attr].total += 1;
+    attrTotals[attr].maxScore += 100;
+  });
+  const overallTotals = {
+    total: tasks.length,
+    maxScore: tasks.length * 100
+  };
+
+  const rows = (students || []).map(stu => {
+    const states = readUserTaskStates_(stu.userId, '');
+    const summary = { attributes: {}, overall: { cleared: 0, total: overallTotals.total, scoreSum: 0, maxScore: overallTotals.maxScore } };
+    TASK_ATTRIBUTE_LABELS.forEach(attr => {
+      summary.attributes[attr] = {
+        cleared: 0,
+        total: (attrTotals[attr] && attrTotals[attr].total) || 0,
+        scoreSum: 0,
+        maxScore: (attrTotals[attr] && attrTotals[attr].maxScore) || 0
+      };
+    });
+
+    const scores = [];
+    tasks.forEach(t => {
+      const state = states[String(t.taskId)] || {};
+      const rawScore = state.score;
+      const hasScore = rawScore !== '' && rawScore != null && String(rawScore).trim() !== '';
+      const numeric = hasScore ? Number(rawScore) : NaN;
+      const attr = summary.attributes[t.attribute] ? t.attribute : 'その他';
+
+      if (!isNaN(numeric)) {
+        summary.attributes[attr].scoreSum += numeric;
+        summary.overall.scoreSum += numeric;
+      }
+      if (!isNaN(numeric) && numeric === 100) {
+        summary.attributes[attr].cleared += 1;
+        summary.overall.cleared += 1;
+      }
+
+      scores.push(hasScore ? rawScore : '');
+    });
+
+    return {
+      userId: String(stu.userId || ''),
+      classId: String(stu.classId || ''),
+      number: String(stu.number || ''),
+      summary,
+      scores
+    };
+  });
+
+  const generatedAt = fmtDate_(new Date());
+  return {
+    status: 'ok',
+    generatedAt,
+    attributes: TASK_ATTRIBUTE_LABELS.slice(),
+    tasks,
+    rows,
+    source: 'rebuilt'
+  };
+}
+
+function writeUserProgressSheet_(data) {
+  const attrs = TASK_ATTRIBUTE_LABELS.slice();
+  const header = ['UserId', 'ClassId', 'Number'];
+  const attrRow = ['', '', ''];
+  const pathRow = ['', '', ''];
+
+  attrs.forEach(attr => {
+    header.push(`${attr} クリア件数`, `${attr} 総件数`, `${attr} スコア合計`, `${attr} 満点合計`);
+    attrRow.push(attr, attr, attr, attr);
+    pathRow.push('', '', '', '');
+  });
+
+  header.push('全体 クリア件数', '全体 総件数', '全体 スコア合計', '全体 満点合計');
+  attrRow.push('ALL', 'ALL', 'ALL', 'ALL');
+  pathRow.push('', '', '', '');
+
+  (data.tasks || []).forEach(t => {
+    header.push(t.taskId);
+    attrRow.push(t.attribute || 'その他');
+    pathRow.push(t.path || t.title || t.taskId);
+  });
+
+  const metaRow = new Array(header.length).fill('');
+  metaRow[0] = 'GeneratedAt';
+  metaRow[1] = data.generatedAt || '';
+  metaRow[2] = 'TaskCount';
+  metaRow[3] = (data.tasks || []).length;
+
+  const rows = (data.rows || []).map(row => {
+    const cells = [row.userId || '', row.classId || '', row.number || ''];
+    attrs.forEach(attr => {
+      const s = (row.summary && row.summary.attributes && row.summary.attributes[attr]) || { cleared: 0, total: 0, scoreSum: 0, maxScore: 0 };
+      cells.push(Number(s.cleared || 0), Number(s.total || 0), Number(s.scoreSum || 0), Number(s.maxScore || 0));
+    });
+    const all = (row.summary && row.summary.overall) || { cleared: 0, total: 0, scoreSum: 0, maxScore: 0 };
+    cells.push(Number(all.cleared || 0), Number(all.total || 0), Number(all.scoreSum || 0), Number(all.maxScore || 0));
+    (data.tasks || []).forEach((_, idx) => {
+      const score = row.scores ? row.scores[idx] : '';
+      cells.push(score === undefined || score === null ? '' : score);
+    });
+    return cells;
+  });
+
+  const allRows = [metaRow, header, attrRow, pathRow].concat(rows);
+  const ss = openSs_();
+  let sh = ss.getSheetByName(USER_PROGRESS_SHEET);
+  if (!sh) sh = ss.insertSheet(USER_PROGRESS_SHEET);
+  sh.clearContents();
+  if (allRows.length > 0 && header.length > 0) {
+    sh.getRange(1, 1, allRows.length, header.length).setValues(allRows);
+  }
+  try { sh.setFrozenRows(4); } catch (_) {}
+}
+
+function readUserProgressSheet_() {
+  const ss = openSs_();
+  const sh = ss.getSheetByName(USER_PROGRESS_SHEET);
+  if (!sh) return null;
+  const values = sh.getDataRange().getValues();
+  if (!values || values.length < 4) return null;
+
+  const header = values[1] || [];
+  const attrRow = values[2] || [];
+  const pathRow = values[3] || [];
+  const generatedAt = values[0] && values[0][1] ? String(values[0][1]) : '';
+
+  const baseCols = 3 + TASK_ATTRIBUTE_LABELS.length * 4 + 4;
+  const tasks = [];
+  for (let c = baseCols; c < header.length; c++) {
+    const taskId = String(header[c] || '').trim();
+    if (!taskId) continue;
+    const attribute = normalizeTaskAttributeValue_(attrRow[c] || '') || 'その他';
+    const path = String(pathRow[c] || header[c] || '').trim();
+    const title = path ? (path.split(' / ').pop() || taskId) : taskId;
+    tasks.push({ taskId, attribute, path, title });
+  }
+
+  const rows = [];
+  for (let r = 4; r < values.length; r++) {
+    const row = values[r] || [];
+    const userId = String(row[0] || '');
+    const classId = String(row[1] || '');
+    const number = String(row[2] || '');
+    if (!userId && !classId && !number) continue;
+
+    const summary = { attributes: {}, overall: { cleared: 0, total: 0, scoreSum: 0, maxScore: 0 } };
+    let idx = 3;
+    TASK_ATTRIBUTE_LABELS.forEach(attr => {
+      const cleared = Number(row[idx] || 0);
+      const total = Number(row[idx + 1] || 0);
+      const scoreSum = Number(row[idx + 2] || 0);
+      const maxScore = Number(row[idx + 3] || 0);
+      summary.attributes[attr] = { cleared, total, scoreSum, maxScore };
+      idx += 4;
+    });
+    summary.overall = {
+      cleared: Number(row[idx] || 0),
+      total: Number(row[idx + 1] || 0),
+      scoreSum: Number(row[idx + 2] || 0),
+      maxScore: Number(row[idx + 3] || 0)
+    };
+    idx += 4;
+
+    const scores = [];
+    for (let c = idx; c < idx + tasks.length; c++) {
+      const raw = row[c];
+      scores.push(raw === undefined || raw === null ? '' : raw);
+    }
+
+    rows.push({ userId, classId, number, summary, scores });
+  }
+
+  return { status: 'ok', generatedAt, attributes: TASK_ATTRIBUTE_LABELS.slice(), tasks, rows, source: 'cached' };
+}
+
+function getUserProgress_(e) {
+  const data = readUserProgressSheet_();
+  if (data) return json_(data);
+  const rebuilt = buildUserProgressData_();
+  writeUserProgressSheet_(rebuilt);
+  return json_(rebuilt);
+}
+
+function buildUserProgress_(e) {
+  const data = buildUserProgressData_();
+  writeUserProgressSheet_(data);
+  return json_(data);
 }
 
 
