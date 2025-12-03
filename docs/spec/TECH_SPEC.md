@@ -34,6 +34,7 @@
 - 採点対象外: 課題属性が「その他」のものは常に `[採点対象外]` バッジとグレーのドットで表示し、提出ボタンは無効化します。提出済み扱いや満点アイコンには遷移せず、コメントバルーンも非表示になります。
 - 目的: 課題一覧の表示、問題の閲覧、コード編集、実行/保存/提出など学習に必要な機能を提供します。
 - UI 要素: サイドバー #taskList と #tasks は課題ツリーを表示し、フォルダには .toggle-btn、未提出・提出済み等の状態を示すバッジ .status-badge が付きます。問題表示領域は #problemTitle（タイトル）、#problemText（説明 HTML）、#hintButton と #hint（ヒント表示）。コードエディタは #editor で CodeMirror により構築され、支援用の透かしテキストは #ghostText に描画されます。実行・停止・保存・提出などの制御ボタン #playButton/#stopIconButton/#runButton/#stopButton/#saveButton/#submitButton、学習支援トグル #assistToggle とラベル #assistLabel、ヘルプ #helpButton、状態表示 #statusMessage、ログアウト #logoutButton があります。 またコード領域と実行結果領域の間には角丸のコメントバルーン #commentBubble を配置し、採点コメントや100点時の祝福メッセージ（スコア 100 の場合は固定文「満点クリア、お見事！おめでとう♪」）を吹き出し形式で表示します。バルーン全体をクリックすると折りたたまれて「…」アイコンになり、アイコンを押すと再展開します。バルーン下部には常に淡色のガイド文「クリックで最小化」が表示され、操作方法を明示します。コメントもスコアも無い場合や課題属性が「その他」の場合はコメントバルーンを非表示にします。
+- **コードエディタの補助**: CodeMirror の lint オプションは pythonLinter でコンパイルを行い、入力が止まってから約 2 秒後に構文エラーを自動チェックして赤系の下線＋背景で強調表示します。エラーは画面上部から順に「最初に見つかったものだけ」をマーキングし、invalid character/U+XXXX が含まれる場合は該当文字（例: 全角コロン）をピンポイントで強調します。構文エラーでオフセットが次トークンにずれた場合は直前の識別子（例: retarn）を優先表示します。コンパイル通過後は AST を走査して未定義変数を検出し、最初の未定義箇所をエラー扱いにします。全角スペースは薄い枠付きの □ で描画し、半角スペースと視覚的に区別できるようにしています。
 - 主要処理フロー:
  1.課題リストの読み込み – ページ読み込み時に SheetIO.requestTaskList (action=getTasks) を呼び出し、取得したタスクリストを tasksData に格納し renderTaskTree() で階層 UI を生成します。最後に選択した課題は SELECTED_KEY() に保存されており、初期表示時に復元されます。
  2.課題選択 – selectTask(taskId) は現在のコード/出力をローカルキャッシュに保存した後、新課題の詳細をキャッシュまたは SheetIO.requestTaskDetail (GET) から取得し、問題文・ヒント・CodeMirror に適用します。初回ヒント表示時は saveSpecificTask() が非同期で GAS にサイレント送信されます。
@@ -82,7 +83,7 @@
 - runner.js – runCode()/stopCode()/handleStdoutChunk()/showInlineInput() など Pyodide 実行と Worker 制御のコア処理をまとめています。EXEC_TIMEOUT_MS によるタイムアウト、入力キャンセル、plot 挿入もこのファイルです。
 - task_panel.js – normalizeTasks()/applyTasksData()/renderTaskTree()/loadResults() で課題一覧と成績バッジを描画し、折りたたみ状態を維持します。
 - task_selection.js – selectTask()/saveToServer()/submitToServer()/cancelSubmission()/applyInitialCodeIfBlank() など、課題選択と保存・提出ロジックを担当します。ヒント開封時のサイレント保存もここです。
-- editor_controls.js – initEditor()/setupControls()/updateGhostVisibility()/showStatusMessage()/pythonLinter()/updatePlayStopButtons() を保持し、CodeMirror と UI イベントを初期化します。
+- editor_controls.js – initEditor()/setupControls()/updateGhostVisibility()/showStatusMessage()/pythonLinter()/updatePlayStopButtons() を保持し、CodeMirror と UI イベントを初期化します。pythonLinter は Pyodide で compile し、invalid character/U+XXXX を特定して該当文字のみ強調、invalid syntax で位置がずれる場合は直前の識別子を優先表示します。compile 通過後も AST を走査して未定義変数を検出し、最初の未定義箇所をエラーとして返します。エラー箇所は上から 1 件目のみをハイライトします。
 
 ### py_worker.js
 - onmessage ハンドラ – メインスレッドから {type:'run', token, code, needsMatplotlib} が届くと Pyodide をロードし、必要に応じて matplotlib.use('Agg') と plt.show をラップして PNG dataURI を print("<<<PLOT>>>data:image/png;base64,...") で出力します。
@@ -166,3 +167,4 @@ Apps Script (Code.gs) では Google スプレッドシートをデータベー�
 ## index.html（トップ画面）の追加表示
 - ユーザ進捗サマリ: その他を除外したうえで、ログイン中ユーザの「クリア件数/総数」「スコア合計/満点」を課題状態ボックスの上部に表示する。
 - ハイスコア（上位20名）: user_progress シートを action=getUserProgress でキャッシュ読み込みし、再集計は実行しない。属性「その他」を除外し、スコア合計降順で上位20件を表示する。ヘッダは「順位/クラス/クリア件数/スコア合計/基礎/演習/発展」。基礎・演習・発展列にはその属性の課題スコアを連結して表示し、100 点は属性色の ★、数値スコアはそのまま、未提出・未採点・0 点は空文字。列は圧縮表示で横スクロール可。
+
