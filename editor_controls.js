@@ -197,6 +197,14 @@ def walk(node, scope):
     global undefined
     if undefined is not None:
         return
+    if isinstance(node, ast.Import):
+        for alias in node.names:
+            scope.add(alias.asname or alias.name.split('.')[0])
+        return
+    if isinstance(node, ast.ImportFrom):
+        for alias in node.names:
+            scope.add(alias.asname or alias.name.split('.')[0])
+        return
     if isinstance(node, ast.Assign):
         for t in node.targets:
             collect_store(t, scope)
