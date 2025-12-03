@@ -43,6 +43,10 @@
   let plotPyodide = null;
   let plotPyodideInit = null;
   let plotRunQueue = Promise.resolve();
+  let lintPyodide = null;
+  let lintPyodideInit = null;
+  const LINT_ERROR_COMMENT = '提出されたプログラムは実行するとエラーになります。内容を修正し、最後まで正しく実行できたら、再度、提出をしてください。';
+  const LINT_ERROR_CLASS = 'lint-error-highlight';
 
   const cloneDeep = (obj) => (obj ? JSON.parse(JSON.stringify(obj)) : obj);
   const pendingKeyFor = (classId, taskId) => `${classId || 'default'}::${taskId || ''}`;
@@ -164,6 +168,152 @@
     const next = plotRunQueue.then(() => fn());
     plotRunQueue = next.catch(() => {});
     return next;
+  }
+
+  async function ensureLintPyodide() {
+    if (lintPyodide) return lintPyodide;
+    if (lintPyodideInit) return lintPyodideInit;
+    // すでにプロット用が初期化されていればそれを流用する
+    if (plotPyodide) {
+      lintPyodide = plotPyodide;
+      return lintPyodide;
+    }
+    lintPyodideInit = (async () => {
+      if (typeof loadPyodide === 'undefined') {
+        const candidates = [
+          'https://cdn.jsdelivr.net/pyodide/v0.22.1/full/pyodide.js',
+          './pyodide/pyodide.js',
+          './pyodide.js'
+        ];
+        let lastErr = null;
+        for (const src of candidates) {
+          try {
+            await new Promise((resolve, reject) => {
+              const s = document.createElement('script');
+              s.src = src;
+              s.onload = resolve;
+              s.onerror = reject;
+              document.head.appendChild(s);
+            });
+            break;
+          } catch (e) {
+            lastErr = e;
+          }
+        }
+        if (typeof loadPyodide === 'undefined') {
+          throw lastErr || new Error('pyodide.js の読み込みに失敗しました');
+        }
+      }
+      const py = await loadPyodide({ indexURL: 'https://cdn.jsdelivr.net/pyodide/v0.22.1/full/' });
+      return py;
+    })().then(py => {
+      lintPyodide = py;
+      return py;
+    }).finally(() => {
+      lintPyodideInit = null;
+    });
+    return lintPyodideInit;
+  }
+
+  async function analyzeSubmissionCode(code) {
+    if (!code || !String(code).trim()) {
+      return { ok: false, reason: 'empty' };
+    }
+    try {
+      const py = await ensureLintPyodide();
+      const script = [
+        'import json, ast, builtins, keyword',
+        'source = str(__code_source__)',
+        'lines = source.splitlines()',
+        'def line_at(n):',
+        '    if n <= 0: return ""',
+        '    if n <= len(lines): return lines[n-1]',
+        '    return ""',
+        'try:',
+        '    compile(source, "<lint>", "exec")',
+        'except SyntaxError as e:',
+        '    detail = {"kind":"syntax","line": e.lineno or 1, "col": e.offset or 1, "msg": e.msg, "text": e.text or ""}',
+        '    raise RuntimeError(json.dumps(detail))',
+        'tree = ast.parse(source, "<lint>", "exec")',
+        'builtins_set = set(dir(builtins))',
+        'kwset = set(keyword.kwlist)',
+        'undefined = None',
+        'def collect_store(target, scope):',
+        '    if isinstance(target, ast.Name):',
+        '        scope.add(target.id)',
+        '    elif isinstance(target, (ast.Tuple, ast.List)):',
+        '        for elt in target.elts:',
+        '            collect_store(elt, scope)',
+        'def walk(node, scope):',
+        '    global undefined',
+        '    if undefined is not None:',
+        '        return',
+        '    if isinstance(node, ast.Assign):',
+        '        for t in node.targets: collect_store(t, scope)',
+        '        walk(node.value, scope)',
+        '        return',
+        '    if isinstance(node, ast.AugAssign):',
+        '        walk(node.value, scope)',
+        '        collect_store(node.target, scope)',
+        '        return',
+        '    if isinstance(node, (ast.For, ast.AsyncFor)):',
+        '        walk(node.iter, scope)',
+        '        collect_store(node.target, scope)',
+        '        for b in node.body: walk(b, scope)',
+        '        for b in node.orelse: walk(b, scope)',
+        '        return',
+        '    if isinstance(node, ast.With):',
+        '        for item in node.items:',
+        '            if item.optional_vars: collect_store(item.optional_vars, scope)',
+        '            walk(item.context_expr, scope)',
+        '        for b in node.body: walk(b, scope)',
+        '        return',
+        '    if isinstance(node, ast.FunctionDef):',
+        '        scope.add(node.name)',
+        '        new_scope = set(scope)',
+        '        for arg in node.args.args + node.args.kwonlyargs:',
+        '            new_scope.add(arg.arg)',
+        '        if node.args.vararg: new_scope.add(node.args.vararg.arg)',
+        '        if node.args.kwarg: new_scope.add(node.args.kwarg.arg)',
+        '        for d in node.decorator_list: walk(d, scope)',
+        '        for d in node.args.defaults: walk(d, scope)',
+        '        for d in node.args.kw_defaults:',
+        '            if d: walk(d, scope)',
+        '        for b in node.body: walk(b, new_scope)',
+        '        return',
+        '    if isinstance(node, ast.AsyncFunctionDef):',
+        '        walk(ast.FunctionDef(name=node.name, args=node.args, body=node.body, decorator_list=node.decorator_list, returns=node.returns, type_comment=node.type_comment), scope)',
+        '        return',
+        '    if isinstance(node, ast.ClassDef):',
+        '        scope.add(node.name)',
+        '        for b in node.bases: walk(b, scope)',
+        '        for kw in node.keywords: walk(kw.value, scope)',
+        '        for d in node.decorator_list: walk(d, scope)',
+        '        for b in node.body: walk(b, scope)',
+        '        return',
+        '    if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):',
+        '        if node.id not in scope and node.id not in builtins_set and node.id not in kwset and undefined is None:',
+        '            undefined = {"kind":"undefined","name":node.id,"line": node.lineno or 1, "col": (node.col_offset or 0)+1, "msg": f"未定義の変数: {node.id}", "text": line_at(node.lineno)}',
+        '        return',
+        '    for child in ast.iter_child_nodes(node):',
+        '        walk(child, scope)',
+        'walk(tree, set())',
+        'if undefined:',
+        '    raise RuntimeError(json.dumps(undefined))',
+      ].join('\n');
+      const detailJson = await py.runPythonAsync(`__code_source__ = ${JSON.stringify(code)}\n${script}\n'OK'`);
+      if (detailJson === 'OK') return { ok: true };
+      return { ok: true };
+    } catch (err) {
+      const raw = err && err.message ? String(err.message) : String(err || '');
+      let detail = null;
+      try { detail = JSON.parse(raw); } catch(_) {}
+      if (!detail) {
+        const m = raw.match(/(\{[\s\S]*\"line\"\s*:\s*\d+[\s\S]*\})/);
+        if (m) { try { detail = JSON.parse(m[1]); } catch(_) {} }
+      }
+      return { ok: false, detail, message: detail?.msg || raw };
+    }
   }
 
   async function ensurePlotPyodide() {
@@ -413,6 +563,55 @@
       fetchedAt: incoming.fetchedAt || base.fetchedAt || '',
       localGrades: cloneDeep(base.localGrades || {})
     };
+  }
+
+  function escapeHtml(str) {
+    return String(str || '').replace(/[&<>]/g, ch => {
+      if (ch === '&') return '&amp;';
+      if (ch === '<') return '&lt;';
+      return '&gt;';
+    });
+  }
+
+  function renderCodeWithLint(codeBlock, codeText, lintDetail) {
+    if (!codeBlock) return;
+    const lines = String(codeText || '---').split(/\r?\n/);
+    const hasLint = lintDetail && lintDetail.line;
+    const lineIdx = hasLint ? Math.max(0, (lintDetail.line || 1) - 1) : -1;
+    const colIdx = hasLint ? Math.max(0, (lintDetail.col || 1) - 1) : 0;
+    const nameLen = hasLint && lintDetail.name ? String(lintDetail.name).length : 1;
+    const safeLine = hasLint ? Math.min(lineIdx, Math.max(0, lines.length - 1)) : -1;
+    const parts = lines.map((ln, idx) => {
+      const renderLine = (text, highlightStart = -1, highlightEnd = -1) => {
+        const segments = [];
+        for (let i = 0; i < text.length; i++) {
+          const ch = text[i];
+          if (ch === '\u3000') {
+            segments.push('<span class="fw-space">□</span>');
+          } else {
+            const escaped = escapeHtml(ch);
+            if (highlightStart >= 0 && i >= highlightStart && i < highlightEnd) {
+              segments.push(`<span class="${LINT_ERROR_CLASS}">${escaped || ' '}</span>`);
+            } else {
+              segments.push(escaped);
+            }
+          }
+        }
+        // 行末で強調が必要だが文字が無い場合のための空白
+        if (highlightStart >= text.length && highlightStart >= 0) {
+          segments.push(`<span class="${LINT_ERROR_CLASS}"> </span>`);
+        }
+        return segments.join('');
+      };
+      if (idx === safeLine && hasLint) {
+        const start = Math.max(0, Math.min(colIdx, Math.max(0, ln.length - 1)));
+        const end = Math.min(ln.length, start + Math.max(1, nameLen));
+        return renderLine(ln, start, end);
+      }
+      return renderLine(ln);
+    });
+    codeBlock.innerHTML = parts.join('\n');
+    if (hasLint) codeBlock.classList.add('has-lint-error'); else codeBlock.classList.remove('has-lint-error');
   }
 
   function updateCacheFromState() {
@@ -772,7 +971,8 @@
         locked: submission ? !submission.submitted : true,
         submitted: !!submission?.submitted,
         serverSignature: signature,
-        dirty: false
+        dirty: false,
+        lintError: null
       };
       userGrades[taskId] = entry;
     }
@@ -878,7 +1078,7 @@
 
       const codeBlock = document.createElement('pre');
       codeBlock.className = 'code-block';
-      codeBlock.textContent = submission?.code || '---';
+      renderCodeWithLint(codeBlock, submission?.code || '---', localEntry.lintError);
 
       const hasPlotOutput = isPlotOutput(submission?.output);
       const outputBlock = document.createElement(hasPlotOutput ? 'div' : 'pre');
@@ -1067,16 +1267,53 @@
     }
   }
 
-  function handleBulkFull() {
+  async function handleBulkFull() {
     const currentTaskId = state.selectedTaskId;
     if (!currentTaskId) return;
-    const cards = document.querySelectorAll(`.student-card[data-task-id="${currentTaskId}"][data-submitted="true"]`);
-    cards.forEach(card => {
-      const input = card.querySelector('.score-input');
-      if (!input || input.disabled) return;
-      input.value = '100';
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-    });
+    const cards = Array.from(document.querySelectorAll(`.student-card[data-task-id="${currentTaskId}"][data-submitted="true"]`));
+    if (!cards.length) return;
+    bulkButton.disabled = true;
+    const errorComment = LINT_ERROR_COMMENT;
+    for (const card of cards) {
+      const userId = card.dataset.userId;
+      const submission = (state.submissions[userId] || {})[currentTaskId];
+      const code = submission?.code || '';
+      const scoreInput = card.querySelector('.score-input');
+      const commentInput = card.querySelector('.comment-input');
+      if (!scoreInput || scoreInput.disabled) continue;
+      let hasError = false;
+      let lintDetail = null;
+      try {
+        const result = await analyzeSubmissionCode(code);
+        hasError = !result.ok;
+        lintDetail = result.detail || null;
+      } catch (e) {
+        console.warn('[bulkFull] lint failed, fallback to 100', e);
+        hasError = false;
+      }
+      if (hasError) {
+        scoreInput.value = '0';
+        if (commentInput && !commentInput.disabled) {
+          commentInput.value = errorComment;
+          commentInput.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+        editLocalGrade(userId, currentTaskId, entry => {
+          entry.lintError = lintDetail || null;
+        });
+        const codeBlock = card.querySelector('.code-block');
+        renderCodeWithLint(codeBlock, code, lintDetail);
+      } else {
+        scoreInput.value = '100';
+        editLocalGrade(userId, currentTaskId, entry => {
+          entry.lintError = null;
+        });
+        const codeBlock = card.querySelector('.code-block');
+        renderCodeWithLint(codeBlock, code, null);
+      }
+      scoreInput.dispatchEvent(new Event('input', { bubbles: true }));
+      card.dataset.editing = 'true';
+    }
+    bulkButton.disabled = false;
     focusFirstVisibleScoreInput(currentTaskId);
   }
 
