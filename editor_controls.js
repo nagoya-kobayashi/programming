@@ -199,11 +199,11 @@ def walk(node, scope):
         return
     if isinstance(node, ast.Import):
         for alias in node.names:
-            scope.add(alias.asname or alias.name.split('.')[0])
+            scope.add(alias.asname or alias.name.split(".")[0])
         return
     if isinstance(node, ast.ImportFrom):
         for alias in node.names:
-            scope.add(alias.asname or alias.name.split('.')[0])
+            scope.add(alias.asname or alias.name.split(".")[0])
         return
     if isinstance(node, ast.Assign):
         for t in node.targets:
