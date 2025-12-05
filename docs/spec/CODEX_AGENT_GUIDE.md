@@ -7,6 +7,7 @@
 
 - `/docs/spec/AGENT_GUIDE.md`   … システムの構造・注意点（人間開発者向け）
 - `/docs/spec/TECH_SPEC.md`     … 詳細な技術仕様
+- `/docs/spec/SPREADSHEET_SCHEMA.md` … スプレッドシートの列定義と並び順
 - `/docs/spec/BUGS_AND_RISKS.md` … 既知バグとリスク
 - この `/docs/spec/CODEX_AGENT_GUIDE.md` … あなた自身（Codex）の行動ルール
 
@@ -65,6 +66,7 @@ Codex は、次のフローに従って作業すること。
 2. **関連ドキュメントを確認**
    - `/docs/spec/AGENT_GUIDE.md`
    - `/docs/spec/TECH_SPEC.md`
+   - `/docs/spec/SPREADSHEET_SCHEMA.md`
    - `/docs/spec/DATA_FLOW.md`
    - `/docs/spec/BUGS_AND_RISKS.md`
    を開き、関連する部分を確認する。
