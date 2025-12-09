@@ -14,7 +14,8 @@
     localGrades: {},
     pendingSaves: Object.create(null),
     submittedCount: {},
-    latestFetchedAt: ''
+    latestFetchedAt: '',
+    latestFetchStartedAt: ''
   };
 
   const collapsedFolders = new Set();
@@ -47,6 +48,7 @@
   let lintPyodideInit = null;
   const LINT_ERROR_COMMENT = '提出されたプログラムは実行するとエラーになります。内容を修正し、最後まで正しく実行できたら、再度、提出をしてください。';
   const LINT_ERROR_CLASS = 'lint-error-highlight';
+  const LINT_TAB_SIZE = 4;
 
   const cloneDeep = (obj) => (obj ? JSON.parse(JSON.stringify(obj)) : obj);
   const pendingKeyFor = (classId, taskId) => `${classId || 'default'}::${taskId || ''}`;
@@ -56,6 +58,30 @@
     if (!s) return 'その他';
     return allowed.includes(s) ? s : 'その他';
   };
+
+  function normalizeTabsToSpaces(text, tabSize = LINT_TAB_SIZE) {
+    const size = Math.max(1, Number(tabSize) || LINT_TAB_SIZE);
+    const spaces = ' '.repeat(size);
+    return String(text || '').replace(/\t/g, spaces);
+  }
+
+  function mapExpandedColToRaw(line, expandedCol, tabSize = LINT_TAB_SIZE) {
+    const size = Math.max(1, Number(tabSize) || LINT_TAB_SIZE);
+    const target = Math.max(1, Number(expandedCol) || 1);
+    let expanded = 0;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (ch === '\t') {
+        const next = expanded + size;
+        if (next >= target) return i + 1; // 1-origin
+        expanded = next;
+      } else {
+        expanded += 1;
+        if (expanded >= target) return i + 1;
+      }
+    }
+    return line.length + 1;
+  }
 
   function showMessage(text, type = '') {
     globalMessage.textContent = text || '';
@@ -216,7 +242,9 @@
   }
 
   async function analyzeSubmissionCode(code) {
-    if (!code || !String(code).trim()) {
+    const rawCode = String(code || '');
+    const normalizedCode = normalizeTabsToSpaces(rawCode, LINT_TAB_SIZE);
+    if (!normalizedCode.trim()) {
       return { ok: false, reason: 'empty' };
     }
     try {
@@ -309,7 +337,7 @@
         'if undefined:',
         '    raise RuntimeError(json.dumps(undefined))',
       ].join('\n');
-      const detailJson = await py.runPythonAsync(`__code_source__ = ${JSON.stringify(code)}\n${script}\n'OK'`);
+      const detailJson = await py.runPythonAsync(`__code_source__ = ${JSON.stringify(normalizedCode)}\n${script}\n'OK'`);
       if (detailJson === 'OK') return { ok: true };
       return { ok: true };
     } catch (err) {
@@ -319,6 +347,12 @@
       if (!detail) {
         const m = raw.match(/(\{[\s\S]*\"line\"\s*:\s*\d+[\s\S]*\})/);
         if (m) { try { detail = JSON.parse(m[1]); } catch(_) {} }
+      }
+      if (detail && detail.line) {
+        const rawLineText = rawCode.split(/\r?\n/)[Math.max(0, (detail.line || 1) - 1)] || '';
+        const mappedCol = mapExpandedColToRaw(rawLineText, detail.col || 1, LINT_TAB_SIZE);
+        detail.col = mappedCol;
+        detail.text = rawLineText;
       }
       return { ok: false, detail, message: detail?.msg || raw };
     }
@@ -569,6 +603,7 @@
       students: cloneDeep(students),
       submissions: mergeSubmissionSets(base.submissions || {}, incoming.submissions || {}),
       fetchedAt: incoming.fetchedAt || base.fetchedAt || '',
+      fetchStartedAt: incoming.fetchStartedAt || base.fetchStartedAt || '',
       localGrades: cloneDeep(base.localGrades || {})
     };
   }
@@ -630,6 +665,7 @@
       students: state.students,
       submissions: state.submissions,
       fetchedAt: state.latestFetchedAt || '',
+      fetchStartedAt: state.latestFetchStartedAt || '',
       localGrades: state.localGrades
     });
   }
@@ -710,6 +746,7 @@
     state.selectedTaskId = '';
     state.selectedTaskTitle = '';
     state.latestFetchedAt = '';
+    state.latestFetchStartedAt = '';
     classInfo.textContent = state.classId ? `対象クラス: ${state.classId}` : '対象クラス: 未選択';
     taskTree.classList.add('empty');
     taskTree.textContent = '読み込み中...';
@@ -752,6 +789,7 @@
     }
     state.localGrades = data.localGrades || {};
     state.latestFetchedAt = data.fetchedAt || state.latestFetchedAt || '';
+    state.latestFetchStartedAt = data.fetchStartedAt || state.latestFetchStartedAt || '';
     prepareLocalGradesFromSubmissions();
     recomputeSubmittedCounts();
     updateClassInfo();
@@ -1233,10 +1271,11 @@
       resetStateForLoading(classValue);
     }
 
-    const lastLoadedAt = cachedSnapshot?.fetchedAt || '';
+    const lastLoadedAt = cachedSnapshot?.fetchStartedAt || cachedSnapshot?.fetchedAt || '';
     showMessage('');
     setLoading(true);
     saveStatus.textContent = '';
+    const requestStartedAt = new Date().toISOString();
     try {
       const params = new URLSearchParams();
       params.append('action', 'getClassSubmissions');
@@ -1260,9 +1299,11 @@
         tasks: normalizeTasks(data.tasks || []),
         students: data.students || [],
         submissions: data.submissions || {},
-        fetchedAt: data.fetchedAt || ''
+        fetchedAt: data.fetchedAt || '',
+        fetchStartedAt: requestStartedAt
       });
       state.latestFetchedAt = mergedCache.fetchedAt || state.latestFetchedAt || '';
+      state.latestFetchStartedAt = mergedCache.fetchStartedAt || state.latestFetchStartedAt || '';
       mergedCache.localGrades = mergedCache.localGrades || {};
       saveClassCache(serverClassId, mergedCache);
       applyCacheSnapshot(mergedCache, serverClassId === state.classId);

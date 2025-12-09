@@ -20,6 +20,30 @@ const fullWidthSpaceOverlay = {
   }
 };
 
+function normalizeTabsToSpaces(text, tabSize){
+  const size = Math.max(1, Number(tabSize) || 4);
+  const spaces = ' '.repeat(size);
+  return String(text || '').replace(/\t/g, spaces);
+}
+
+function mapExpandedColToRaw(line, expandedCol, tabSize){
+  const size = Math.max(1, Number(tabSize) || 4);
+  const target = Math.max(1, Number(expandedCol) || 1);
+  let expanded = 0;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '\t') {
+      const next = expanded + size;
+      if (next >= target) return i + 1; // 1-origin
+      expanded = next;
+    } else {
+      expanded += 1;
+      if (expanded >= target) return i + 1;
+    }
+  }
+  return line.length + 1;
+}
+
 function initEditor() {
   editor = CodeMirror.fromTextArea(document.getElementById("editor"), {
     mode: "python", lineNumbers: true, indentUnit: 4, indentWithTabs: false, smartIndent: true,
@@ -149,6 +173,8 @@ function enhanceCodingAssistFollow(){
 }
 
 async function pythonLinter(text){
+  const tabSize = (editor && typeof editor.getOption === 'function') ? (editor.getOption('indentUnit') || 4) : 4;
+  const normalizedText = normalizeTabsToSpaces(text, tabSize);
   const annotations=[]; if(!text.trim()) return annotations;
   const pyReady = !!(pyodide && typeof pyodide.runPythonAsync === 'function');
   console.debug('[lint] start', { len: text.length, pyodideReady: pyReady });
@@ -157,7 +183,7 @@ async function pythonLinter(text){
     return annotations;
   }
   try {
-    pyodide.globals.set('lint_source', text);
+    pyodide.globals.set('lint_source', normalizedText);
     await pyodide.runPythonAsync(`
 import json, ast, builtins, keyword
 lint_text = str(lint_source)
@@ -277,11 +303,11 @@ if undefined:
     let msg = err && err.message ? String(err.message) : err.toString();
     let line = 0;
     let col = 0;
-    let badChar = null;
-    let serverLineText = '';
-    let rawLine = 1;
-    let rawCol = 1;
-    const parseDetail = (raw) => {
+  let badChar = null;
+  let serverLineText = '';
+  let rawLine = 1;
+  let rawCol = 1;
+  const parseDetail = (raw) => {
       if (!raw) return null;
       const s = String(raw);
       // 1) 直接 JSON として解釈
@@ -304,8 +330,11 @@ if undefined:
       rawLine = detail.line || 1;
       rawCol = detail.col || 1;
       line = Math.max(0, rawLine - 1);
+      const rawLineText = (text.split(/\r?\n/)[rawLine - 1]) || '';
+      const mappedCol = mapExpandedColToRaw(rawLineText, rawCol, tabSize);
+      rawCol = mappedCol;
       col = Math.max(0, rawCol - 1);
-      serverLineText = detail.text || '';
+      serverLineText = rawLineText;
     } else {
       const mLine = msg.match(/line (\d+)/i);
       if (mLine) { rawLine = parseInt(mLine[1],10) || 1; line = Math.max(0, rawLine - 1); }
