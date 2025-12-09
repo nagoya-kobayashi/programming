@@ -42,7 +42,7 @@
 GAS → 採点ページ: {status:'ok', classId, students[{userId,number}], submissions[userId][taskId]={code,output,hintOpened,submitted,score,comment}, tasks=[...]}
 ローカルキャッシュ:
 採点ページ → localStorage: `grading.<server>.cache.<ClassId>` に tasks/students/submissions/fetchedAt を保存し、ユーザID↔クラスの対応も `grading.<server>.userClass.<UserId>` に記録
-採点ページ → GAS: `lastLoadedAt`（直近 fetchedAt）付きで getClassSubmissions を再要求
+採点ページ → GAS: `lastLoadedAt`（前回読み込み開始時刻: fetchStartedAt）付きで getClassSubmissions を再要求
 GAS → 採点ページ: `<UserId>` シートで `SavedAt >= lastLoadedAt` な行のみ submissions に含め、レスポンスに最新 fetchedAt を返却
 
 採点保存:
